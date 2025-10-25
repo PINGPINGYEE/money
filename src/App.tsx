@@ -231,13 +231,18 @@ function App() {
     createEmptyCustomerForm,
   );
   const [saleForm, setSaleForm] = useState<SaleFormState>(createEmptySaleForm);
+  const [saleProductQuery, setSaleProductQuery] = useState("");
+  const [saleCustomerQuery, setSaleCustomerQuery] = useState("");
   const [returnForm, setReturnForm] =
     useState<ReturnFormState>(createEmptyReturnForm);
   const [stockForm, setStockForm] =
     useState<StockFormState>(createEmptyStockForm);
+  const [stockProductQuery, setStockProductQuery] = useState("");
+  const [stockCustomerQuery, setStockCustomerQuery] = useState("");
   const [paymentForm, setPaymentForm] = useState<PaymentFormState>(
     createEmptyPaymentForm,
   );
+  const [creditCustomerQuery, setCreditCustomerQuery] = useState("");
   const [ledgerFilter, setLedgerFilter] =
     useState<LedgerFilterState>(createEmptyLedgerFilter);
 
@@ -288,6 +293,30 @@ function App() {
       .sort((a, b) => b.outstanding - a.outstanding);
   }, [data]);
 
+  const productListForSale = useMemo(() => {
+    if (!data) {
+      return [] as Product[];
+    }
+    const q = saleProductQuery.trim().toLowerCase();
+    if (!q) return data.products;
+    return data.products.filter((p) =>
+      p.name.toLowerCase().includes(q) || (p.sku?.toLowerCase().includes(q) ?? false),
+    );
+  }, [data, saleProductQuery]);
+
+  const customerListForSale = useMemo(() => {
+    if (!data) {
+      return [] as Customer[];
+    }
+    const q = saleCustomerQuery.trim().toLowerCase();
+    if (!q) return data.customers;
+    return data.customers.filter((c) => {
+      const nameHit = c.name.toLowerCase().includes(q);
+      const phoneHit = (c.phone ?? "").toLowerCase().includes(q);
+      return nameHit || phoneHit;
+    });
+  }, [data, saleCustomerQuery]);
+
   const filteredSales = useMemo(() => {
     if (!data) {
       return [];
@@ -312,13 +341,19 @@ function App() {
       if (endTime && saleTime > endTime) {
         return false;
       }
-      if (
-        customerTerm &&
-        !(sale.customer_name ?? "일반 손님")
-          .toLowerCase()
-          .includes(customerTerm)
-      ) {
-        return false;
+      if (customerTerm) {
+        const name = (sale.customer_name ?? "일반 손님").toLowerCase();
+        const phoneDigits = (sale.customer_phone ?? "").replace(/\D/g, "");
+        const term = customerTerm;
+        const termDigits = term.replace(/\D/g, "");
+        const termName = term.replace(/\(.+?\)/g, "").trim();
+        const nameMatches = termName ? name.includes(termName) : false;
+        const phoneMatches = termDigits.length >= 2 ? phoneDigits.includes(termDigits) : false;
+        const hasParenDigits = /\(\s*\d{2,}\s*\)/.test(term);
+        const matches = hasParenDigits ? (nameMatches && phoneMatches) : (nameMatches || phoneMatches);
+        if (!matches) {
+          return false;
+        }
       }
       if (
         productTerm &&
@@ -682,6 +717,22 @@ function App() {
     return rows.sort((a, b) => b.total - a.total).slice(0, 5);
   }, [data]);
 
+  const outstandingCustomersFiltered = useMemo(() => {
+    const list = outstandingCustomers;
+    const q = creditCustomerQuery.trim().toLowerCase();
+    if (!q) return list;
+    const hasParenDigits = /\(\s*\d{2,}\s*\)/.test(q);
+    const termDigits = q.replace(/\D/g, "");
+    const termName = q.replace(/\(.+?\)/g, "").trim();
+    return list.filter((balance) => {
+      const name = (balance.customer_name ?? "").toLowerCase();
+      const phoneDigits = (balance.customer_phone ?? "").replace(/\D/g, "");
+      const nameMatches = termName ? name.includes(termName) : false;
+      const phoneMatches = termDigits.length >= 2 ? phoneDigits.includes(termDigits) : false;
+      return hasParenDigits ? (nameMatches && phoneMatches) : (nameMatches || phoneMatches);
+    });
+  }, [outstandingCustomers, creditCustomerQuery]);
+
   const totalInventoryValue = useMemo(() => {
     if (!data) {
       return 0;
@@ -691,6 +742,26 @@ function App() {
       0,
     );
   }, [data]);
+
+  const productListForStock = useMemo(() => {
+    if (!data) return [] as Product[];
+    const q = stockProductQuery.trim().toLowerCase();
+    if (!q) return data.products;
+    return data.products.filter((p) =>
+      p.name.toLowerCase().includes(q) || (p.sku?.toLowerCase().includes(q) ?? false),
+    );
+  }, [data, stockProductQuery]);
+
+  const customerListForStock = useMemo(() => {
+    if (!data) return [] as Customer[];
+    const q = stockCustomerQuery.trim().toLowerCase();
+    if (!q) return data.customers;
+    return data.customers.filter((c) => {
+      const nameHit = c.name.toLowerCase().includes(q);
+      const phoneHit = (c.phone ?? "").toLowerCase().includes(q);
+      return nameHit || phoneHit;
+    });
+  }, [data, stockCustomerQuery]);
 
   const handleProductSubmit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -1486,6 +1557,12 @@ const handleCustomerSubmit = async (event: FormEvent<HTMLFormElement>) => {
           <form onSubmit={handleSaleSubmit} className="form-grid">
             <label>
               상품
+              <input
+                type="text"
+                value={saleProductQuery}
+                onChange={(event) => setSaleProductQuery(event.target.value)}
+                placeholder="상품명/SKU 검색"
+              />
               <select
                 value={saleForm.product_id}
                 onChange={(event) =>
@@ -1495,7 +1572,7 @@ const handleCustomerSubmit = async (event: FormEvent<HTMLFormElement>) => {
                     // 기본 금액을 미터 × 미터당 단가로 계산
                     amount:
                       (() => {
-                        const p = data.products.find(
+                        const p = (data?.products ?? []).find(
                           (product) => product.id === Number(event.target.value),
                         );
                         if (!p) return prev.amount;
@@ -1509,7 +1586,7 @@ const handleCustomerSubmit = async (event: FormEvent<HTMLFormElement>) => {
                 }
               >
                 <option value="">상품 선택</option>
-                {data.products.map((product) => (
+                {productListForSale.map((product) => (
                   <option key={product.id} value={product.id}>
                     {product.name}
                   </option>
@@ -1557,6 +1634,12 @@ const handleCustomerSubmit = async (event: FormEvent<HTMLFormElement>) => {
             </label>
             <label>
               고객 (선택)
+              <input
+                type="text"
+                value={saleCustomerQuery}
+                onChange={(event) => setSaleCustomerQuery(event.target.value)}
+                placeholder="이름/연락처 검색"
+              />
               <select
                 value={saleForm.customer_id}
                 onChange={(event) =>
@@ -1567,7 +1650,7 @@ const handleCustomerSubmit = async (event: FormEvent<HTMLFormElement>) => {
                 }
               >
                 <option value="">일반 손님</option>
-                {data.customers.map((customer) => (
+                {customerListForSale.map((customer) => (
                   <option key={customer.id} value={customer.id}>
                     {formatNameWithPhone(customer.name, customer.phone)}
                   </option>
@@ -1895,6 +1978,12 @@ const handleCustomerSubmit = async (event: FormEvent<HTMLFormElement>) => {
           <form onSubmit={handleStockSubmit} className="form-grid">
             <label>
               상품
+              <input
+                type="text"
+                value={stockProductQuery}
+                onChange={(event) => setStockProductQuery(event.target.value)}
+                placeholder="상품명/SKU 검색"
+              />
               <select
                 value={stockForm.product_id}
                 onChange={(event) =>
@@ -1905,7 +1994,7 @@ const handleCustomerSubmit = async (event: FormEvent<HTMLFormElement>) => {
                 }
               >
                 <option value="">상품 선택</option>
-                {data.products.map((product) => (
+                {productListForStock.map((product) => (
                   <option key={product.id} value={product.id}>
                     {product.name}
                   </option>
@@ -1974,6 +2063,12 @@ const handleCustomerSubmit = async (event: FormEvent<HTMLFormElement>) => {
             </label>
             <label>
               고객 (출고 시)
+              <input
+                type="text"
+                value={stockCustomerQuery}
+                onChange={(event) => setStockCustomerQuery(event.target.value)}
+                placeholder="이름/연락처 검색"
+              />
               <select
                 value={stockForm.customer_id}
                 onChange={(event) =>
@@ -1984,7 +2079,7 @@ const handleCustomerSubmit = async (event: FormEvent<HTMLFormElement>) => {
                 }
               >
                 <option value="">선택 안 함</option>
-                {data.customers.map((customer) => (
+                {customerListForStock.map((customer) => (
                   <option key={customer.id} value={customer.id}>
                     {formatNameWithPhone(customer.name, customer.phone)}
                   </option>
@@ -2132,8 +2227,27 @@ const handleCustomerSubmit = async (event: FormEvent<HTMLFormElement>) => {
                     customer: event.target.value,
                   }))
                 }
-                placeholder="고객명"
+                placeholder="고객명/연락처 검색"
+                list="ledger-customer-suggestions"
               />
+              <datalist id="ledger-customer-suggestions">
+                {(data?.customers ?? [])
+                  .filter((c) => {
+                    const q = ledgerFilter.customer.trim().toLowerCase();
+                    if (!q) return false;
+                    return (
+                      c.name.toLowerCase().includes(q) ||
+                      ((c.phone ?? "").toLowerCase().includes(q))
+                    );
+                  })
+                  .slice(0, 10)
+                  .map((c) => (
+                    <option
+                      key={c.id}
+                      value={formatNameWithPhone(c.name, c.phone)}
+                    />
+                  ))}
+              </datalist>
             </label>
             <label>
               상품 검색
@@ -2146,8 +2260,26 @@ const handleCustomerSubmit = async (event: FormEvent<HTMLFormElement>) => {
                     product: event.target.value,
                   }))
                 }
-                placeholder="상품명"
+                placeholder="상품명/SKU 검색"
+                list="ledger-product-suggestions"
               />
+              <datalist id="ledger-product-suggestions">
+                {(data?.products ?? [])
+                  .filter((p) => {
+                    const q = ledgerFilter.product.trim().toLowerCase();
+                    if (!q) return false;
+                    return (
+                      p.name.toLowerCase().includes(q) ||
+                      ((p.sku ?? "").toLowerCase().includes(q))
+                    );
+                  })
+                  .slice(0, 10)
+                  .map((p) => (
+                    <option key={p.id} value={p.name}>
+                      {p.sku ? `${p.name} (${p.sku})` : p.name}
+                    </option>
+                  ))}
+              </datalist>
             </label>
             <label className="checkbox">
               <input
@@ -2332,6 +2464,12 @@ const handleCustomerSubmit = async (event: FormEvent<HTMLFormElement>) => {
           <form onSubmit={handlePaymentSubmit} className="form-grid">
             <label>
               고객
+              <input
+                type="text"
+                value={creditCustomerQuery}
+                onChange={(event) => setCreditCustomerQuery(event.target.value)}
+                placeholder="이름(1234) 또는 이름/연락처 검색"
+              />
               <select
                 value={paymentForm.customer_id}
                 onChange={(event) =>
@@ -2342,7 +2480,7 @@ const handleCustomerSubmit = async (event: FormEvent<HTMLFormElement>) => {
                 }
               >
                 <option value="">고객 선택</option>
-                {outstandingCustomers.map((balance) => (
+                {outstandingCustomersFiltered.map((balance) => (
                   <option key={balance.customer_id} value={balance.customer_id}>
                     {formatNameWithPhone(
                       balance.customer_name,
@@ -2731,7 +2869,7 @@ function formatDateTime(value: string): string {
   return date.toLocaleString("ko-KR");
 }
 
-function exportToCsv(filename: string, rows: string[][]) {
+async function exportToCsv(filename: string, rows: string[][]) {
   const csv = rows
     .map((row) =>
       row
@@ -2745,6 +2883,23 @@ function exportToCsv(filename: string, rows: string[][]) {
         .join(","),
     )
     .join("\n");
+  // If running in Tauri, save via backend to a real file location
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const tauri = (window as any)?.__TAURI__;
+    if (tauri?.core?.invoke) {
+      // invoke returns the saved path string
+      const savedPath = await tauri.core.invoke("save_csv", { filename, content: csv });
+      // 간단 알림
+      // eslint-disable-next-line no-alert
+      alert(`CSV 저장 완료\n${savedPath}`);
+      return;
+    }
+  } catch {
+    // fall through to web download
+  }
+
+  // Web fallback: trigger browser download
   const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
   const url = URL.createObjectURL(blob);
   const link = document.createElement("a");

@@ -29,7 +29,8 @@ pub fn run() {
             record_stock_entry,
             record_sale,
             record_return,
-            record_credit_payment
+            record_credit_payment,
+            save_csv
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -497,7 +498,7 @@ fn update_customer(state: State<DbState>, payload: CustomerUpdateForm) -> Comman
 
 #[tauri::command]
 fn delete_customer(state: State<DbState>, customer_id: i64) -> CommandResult<AppData> {
-    let mut conn = state.open().map_err(map_app_err)?;
+    let conn = state.open().map_err(map_app_err)?;
     // mark related sales as deleted-customer before FK nullify kicks in
     conn.execute(
         "UPDATE sales SET customer_deleted = 1 WHERE customer_id = ?",
@@ -1204,4 +1205,40 @@ fn fetch_customer_balances(conn: &Connection) -> Result<Vec<CustomerBalance>, Ap
         balances.push(row?);
     }
     Ok(balances)
+}
+
+#[tauri::command]
+fn save_csv(app: tauri::AppHandle, filename: String, content: String) -> CommandResult<String> {
+    // Resolve Desktop directory; fallback to app local data dir if unavailable
+    let desktop_dir = app
+        .path()
+        .desktop_dir()
+        .map_err(|e| AppError::Config(format!("failed to resolve desktop dir: {e}")))
+        .ok();
+
+    let mut target: PathBuf = if let Some(dir) = desktop_dir {
+        dir
+    } else {
+        app
+            .path()
+            .app_local_data_dir()
+            .map_err(|e| AppError::Config(format!("failed to resolve app data dir: {e}")))
+            .map_err(Into::<String>::into)?
+    };
+
+    // Ensure .csv extension
+    let fname = if filename.to_lowercase().ends_with(".csv") {
+        filename
+    } else {
+        format!("{}.csv", filename)
+    };
+
+    target.push(fname);
+
+    fs::write(&target, content).map_err(|e| AppError::Io(e).to_string())?;
+
+    Ok(target
+        .to_str()
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| String::from("saved")))
 }
