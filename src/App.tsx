@@ -15,6 +15,8 @@ import {
   updateProduct,
   updateSale,
   deleteSale,
+  updateReturn,
+  deleteReturn,
 } from "./api";
 import type {
   AppData,
@@ -257,6 +259,13 @@ function App() {
     amount: string;
     customer_id: string;
     is_credit: boolean;
+    note: string;
+  }>(null);
+  const [pendingDeleteReturn, setPendingDeleteReturn] = useState<SaleRecord | null>(null);
+  const [returnEdit, setReturnEdit] = useState<null | {
+    id: number;
+    qty: string;
+    amount: string;
     note: string;
   }>(null);
   const [ledgerFilter, setLedgerFilter] =
@@ -2341,7 +2350,33 @@ const handleCustomerSubmit = async (event: FormEvent<HTMLFormElement>) => {
                     </td>
                     <td>{sale.note ?? "-"}</td>
                     <td className="actions">
-                      {!sale.is_return && (
+                      {sale.is_return ? (
+                        <>
+                          <button
+                            type="button"
+                            className="ghost"
+                            onClick={() =>
+                              setReturnEdit({
+                                id: sale.id,
+                                qty: sale.qty.toString(),
+                                amount: sale.total_amount.toString(),
+                                note: sale.note ?? "",
+                              })
+                            }
+                            disabled={loading}
+                          >
+                            수정
+                          </button>
+                          <button
+                            type="button"
+                            className="danger"
+                            onClick={() => setPendingDeleteReturn(sale)}
+                            disabled={loading}
+                          >
+                            삭제
+                          </button>
+                        </>
+                      ) : (
                         <>
                           <button
                             type="button"
@@ -3211,6 +3246,55 @@ const handleCustomerSubmit = async (event: FormEvent<HTMLFormElement>) => {
         </div>
       )}
 
+      {pendingDeleteReturn && (
+        <div
+          style={{
+            position: "fixed",
+            inset: 0,
+            background: "rgba(0,0,0,0.4)",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            zIndex: 9999,
+          }}
+          role="dialog"
+          aria-modal="true"
+        >
+          <div className="panel" style={{ maxWidth: 480, width: "90%", boxShadow: "0 8px 24px rgba(0,0,0,0.2)" }}>
+            <div className="panel-header">
+              <h2>반품 내역 삭제</h2>
+            </div>
+            <div style={{ padding: "12px 16px" }}>
+              <p>해당 반품을 삭제할까요? 재고와 외상 내역이 함께 조정됩니다.</p>
+            </div>
+            <div className="form-actions" style={{ padding: "0 16px 16px" }}>
+              <button
+                type="button"
+                className="danger"
+                onClick={async () => {
+                  try {
+                    if (!pendingDeleteReturn) return;
+                    await runAction(() => deleteReturn(pendingDeleteReturn.id));
+                    setPendingDeleteReturn(null);
+                  } catch {}
+                }}
+                disabled={loading}
+              >
+                삭제
+              </button>
+              <button
+                type="button"
+                className="secondary"
+                onClick={() => setPendingDeleteReturn(null)}
+                disabled={loading}
+              >
+                취소
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {saleEdit && (
         <div
           style={{
@@ -3326,6 +3410,100 @@ const handleCustomerSubmit = async (event: FormEvent<HTMLFormElement>) => {
                   type="button"
                   className="secondary"
                   onClick={() => setSaleEdit(null)}
+                  disabled={loading}
+                >
+                  취소
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {returnEdit && (
+        <div
+          style={{
+            position: "fixed",
+            inset: 0,
+            background: "rgba(0,0,0,0.4)",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            zIndex: 9999,
+          }}
+          role="dialog"
+          aria-modal="true"
+        >
+          <div className="panel" style={{ maxWidth: 560, width: "95%", boxShadow: "0 8px 24px rgba(0,0,0,0.2)" }}>
+            <div className="panel-header">
+              <h2>반품 내역 수정</h2>
+            </div>
+            <form
+              className="form-grid"
+              onSubmit={async (e) => {
+                e.preventDefault();
+                if (!returnEdit) return;
+                const qty = parseNumber(returnEdit.qty);
+                if (qty <= 0) {
+                  setError("반품 수량은 0보다 커야 합니다.");
+                  return;
+                }
+                const amount = parseNumber(returnEdit.amount);
+                try {
+                  await runAction(() =>
+                    updateReturn({
+                      id: returnEdit.id,
+                      qty,
+                      override_amount: amount,
+                      note: sanitizeNullable(returnEdit.note),
+                    }),
+                  );
+                  setReturnEdit(null);
+                } catch {}
+              }}
+            >
+              <label>
+                반품 미터
+                <input
+                  type="number"
+                  min="0"
+                  step="0.01"
+                  value={returnEdit.qty}
+                  onChange={(e) =>
+                    setReturnEdit((prev) => (prev ? { ...prev, qty: e.target.value } : prev))
+                  }
+                />
+              </label>
+              <label>
+                반품 금액 (원)
+                <input
+                  type="number"
+                  min="0"
+                  step="0.01"
+                  value={returnEdit.amount}
+                  onChange={(e) =>
+                    setReturnEdit((prev) => (prev ? { ...prev, amount: e.target.value } : prev))
+                  }
+                />
+              </label>
+              <label className="span-2">
+                비고
+                <textarea
+                  value={returnEdit.note}
+                  onChange={(e) =>
+                    setReturnEdit((prev) => (prev ? { ...prev, note: e.target.value } : prev))
+                  }
+                  placeholder="메모"
+                />
+              </label>
+              <div className="form-actions">
+                <button type="submit" disabled={loading}>
+                  수정 완료
+                </button>
+                <button
+                  type="button"
+                  className="secondary"
+                  onClick={() => setReturnEdit(null)}
                   disabled={loading}
                 >
                   취소

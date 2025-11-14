@@ -12,6 +12,7 @@ import type {
   ProductUpdatePayload,
   SalePayload,
   ReturnPayload,
+  ReturnUpdatePayload,
   StockEntryPayload,
   StockMovement,
   SaleUpdatePayload,
@@ -634,6 +635,77 @@ async function local_delete_sale(saleId: number): Promise<AppData> {
   return materialize(state);
 }
 
+async function local_update_return(payload: ReturnUpdatePayload): Promise<AppData> {
+  const state = loadState();
+  const ret = state.sales.find((s) => s.id === payload.id && s.is_return);
+  if (!ret) return materialize(state);
+  const product = state.products.find((p) => p.id === ret.product_id);
+  if (!product) return materialize(state);
+  const prevTotal = ret.total_amount;
+  const prevQty = ret.qty;
+  const qtyDelta = payload.qty - prevQty;
+  product.qty = product.qty + qtyDelta;
+  const unit =
+    payload.override_amount != null ? payload.override_amount / payload.qty : ret.unit_price;
+  const total = unit * payload.qty;
+  ret.qty = payload.qty;
+  ret.unit_price = unit;
+  ret.total_amount = total;
+  ret.note = payload.note ?? ret.note;
+  const mv = state.stock_movements.find((m) => m.sale_id === ret.id && m.kind === "RETURN");
+  if (mv) {
+    mv.qty = ret.qty;
+    mv.unit_price = ret.unit_price;
+    mv.total_amount = ret.total_amount;
+    mv.note = ret.note;
+  }
+  const diff = total - prevTotal;
+  if (ret.customer_id != null && diff !== 0) {
+    const id = bumpId("credit");
+    state.credits.unshift({
+      id,
+      ts: nowIso(),
+      customer_id: ret.customer_id!,
+      customer_name: ret.customer_name ?? "",
+      customer_phone: ret.customer_phone ?? null,
+      sale_id: ret.id,
+      amount: Math.abs(diff),
+      is_payment: diff > 0,
+      note: "반품 수정 조정",
+    });
+  }
+  saveState(state);
+  return materialize(state);
+}
+
+async function local_delete_return(returnId: number): Promise<AppData> {
+  const state = loadState();
+  const ret = state.sales.find((s) => s.id === returnId && s.is_return);
+  if (!ret) return materialize(state);
+  const product = state.products.find((p) => p.id === ret.product_id);
+  if (product) {
+    product.qty = Math.max(product.qty - ret.qty, 0);
+  }
+  state.stock_movements = state.stock_movements.filter((m) => m.sale_id !== ret.id);
+  if (ret.customer_id != null) {
+    const id = bumpId("credit");
+    state.credits.unshift({
+      id,
+      ts: nowIso(),
+      customer_id: ret.customer_id!,
+      customer_name: ret.customer_name ?? "",
+      customer_phone: ret.customer_phone ?? null,
+      sale_id: null,
+      amount: ret.total_amount,
+      is_payment: false,
+      note: "반품 삭제 조정",
+    });
+  }
+  state.sales = state.sales.filter((s) => s.id !== ret.id);
+  saveState(state);
+  return materialize(state);
+}
+
 async function call<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
   if (isTauri()) {
     return invoke<T>(cmd, args);
@@ -666,6 +738,10 @@ async function call<T>(cmd: string, args?: Record<string, unknown>): Promise<T> 
       return (await local_update_sale((args as any)?.payload)) as unknown as T;
     case "delete_sale":
       return (await local_delete_sale((args as any)?.saleId)) as unknown as T;
+    case "update_return":
+      return (await (local_update_return as any)((args as any)?.payload)) as unknown as T;
+    case "delete_return":
+      return (await (local_delete_return as any)((args as any)?.returnId)) as unknown as T;
     default:
       throw new Error(`Unsupported command in web demo: ${cmd}`);
   }
@@ -733,4 +809,12 @@ export async function updateSale(payload: SaleUpdatePayload): Promise<AppData> {
 
 export async function deleteSale(saleId: number): Promise<AppData> {
   return call<AppData>("delete_sale", { saleId });
+}
+
+export async function updateReturn(payload: ReturnUpdatePayload): Promise<AppData> {
+  return call<AppData>("update_return", { payload });
+}
+
+export async function deleteReturn(returnId: number): Promise<AppData> {
+  return call<AppData>("delete_return", { returnId });
 }

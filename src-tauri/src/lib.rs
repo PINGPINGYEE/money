@@ -32,6 +32,8 @@ pub fn run() {
             record_credit_payment,
             update_sale,
             delete_sale,
+            update_return,
+            delete_return,
             save_csv
         ])
         .run(tauri::generate_context!())
@@ -897,6 +899,129 @@ fn delete_sale(state: State<DbState>, sale_id: i64) -> CommandResult<AppData> {
     // delete sale
     tx.execute("DELETE FROM sales WHERE id = ?", params![sale_id])
         .map_err(map_sql_err)?;
+    tx.commit().map_err(map_sql_err)?;
+    load_app_data(&state).map_err(Into::into)
+}
+
+#[derive(Debug, Deserialize)]
+struct ReturnUpdatePayload {
+    id: i64, // return sale id
+    qty: f64,
+    note: Option<String>,
+    override_amount: Option<f64>,
+}
+
+#[tauri::command]
+fn update_return(state: State<DbState>, payload: ReturnUpdatePayload) -> CommandResult<AppData> {
+    if payload.qty <= 0.0 {
+        return Err(AppError::Validation("반품 수량은 0보다 커야 합니다.".into()).into());
+    }
+    let mut conn = state.open().map_err(map_app_err)?;
+    let tx = conn.transaction().map_err(map_sql_err)?;
+    // fetch return sale
+    let row = tx
+        .query_row(
+            "SELECT product_id, qty, price_snapshot, customer_id, is_credit FROM sales WHERE id = ? AND is_return = 1",
+            params![payload.id],
+            |row| Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, f64>(1)?,
+                row.get::<_, f64>(2)?,
+                row.get::<_, Option<i64>>(3)?,
+                row.get::<_, i64>(4)? != 0,
+            )),
+        )
+        .optional()
+        .map_err(map_sql_err)?;
+    let (product_id, prev_qty, prev_unit, customer_id, was_credit) = match row {
+        Some(v) => v,
+        None => return Err(AppError::Validation("존재하지 않는 반품입니다.".into()).into()),
+    };
+    let qty_delta = payload.qty - prev_qty;
+    tx.execute(
+        "UPDATE products SET qty = qty + ? WHERE id = ?",
+        params![qty_delta, product_id],
+    )
+    .map_err(map_sql_err)?;
+    let unit = payload
+        .override_amount
+        .map(|v| v / payload.qty)
+        .unwrap_or(prev_unit);
+    let total = unit * payload.qty;
+    tx.execute(
+        "UPDATE sales SET qty = ?, price_snapshot = ?, total_amount = ?, note = ? WHERE id = ?",
+        params![payload.qty, unit, total, payload.note.as_deref(), payload.id],
+    )
+    .map_err(map_sql_err)?;
+    tx.execute(
+        "UPDATE transactions SET qty = ?, unit_price = ?, total_amount = ?, note = ? WHERE sale_id = ? AND kind = 'RETURN'",
+        params![payload.qty, unit, total, payload.note.as_deref(), payload.id],
+    )
+    .map_err(map_sql_err)?;
+    // credit diff adjustment
+    if was_credit {
+        let prev_total: f64 = prev_unit * prev_qty;
+        let diff = total - prev_total;
+        if diff.abs() > f64::EPSILON {
+            if let Some(cid) = customer_id {
+                tx.execute(
+                    "INSERT INTO credits (ts, customer_id, sale_id, amount, is_payment, note) VALUES (?, ?, NULL, ?, ?, ?)",
+                    params![
+                        now_iso(),
+                        cid,
+                        diff.abs(),
+                        if diff > 0.0 { 1 } else { 0 },
+                        Some("반품 수정 조정")
+                    ],
+                )
+                .map_err(map_sql_err)?;
+            }
+        }
+    }
+    tx.commit().map_err(map_sql_err)?;
+    load_app_data(&state).map_err(Into::into)
+}
+
+#[tauri::command]
+fn delete_return(state: State<DbState>, return_id: i64) -> CommandResult<AppData> {
+    let mut conn = state.open().map_err(map_app_err)?;
+    let tx = conn.transaction().map_err(map_sql_err)?;
+    let row = tx
+        .query_row(
+            "SELECT product_id, qty, total_amount, customer_id, is_credit FROM sales WHERE id = ? AND is_return = 1",
+            params![return_id],
+            |row| Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, f64>(1)?,
+                row.get::<_, f64>(2)?,
+                row.get::<_, Option<i64>>(3)?,
+                row.get::<_, i64>(4)? != 0,
+            )),
+        )
+        .optional()
+        .map_err(map_sql_err)?;
+    let (product_id, qty, total_amount, customer_id, was_credit) = match row {
+        Some(v) => v,
+        None => return Err(AppError::Validation("존재하지 않는 반품입니다.".into()).into()),
+    };
+    tx.execute(
+        "UPDATE products SET qty = qty - ? WHERE id = ?",
+        params![qty, product_id],
+    )
+    .map_err(map_sql_err)?;
+    tx.execute("DELETE FROM transactions WHERE sale_id = ?", params![return_id])
+        .map_err(map_sql_err)?;
+    tx.execute("DELETE FROM sales WHERE id = ?", params![return_id])
+        .map_err(map_sql_err)?;
+    if was_credit {
+        if let Some(cid) = customer_id {
+            tx.execute(
+                "INSERT INTO credits (ts, customer_id, sale_id, amount, is_payment, note) VALUES (?, ?, NULL, ?, 0, ?)",
+                params![now_iso(), cid, total_amount, Some("반품 삭제 조정")],
+            )
+            .map_err(map_sql_err)?;
+        }
+    }
     tx.commit().map_err(map_sql_err)?;
     load_app_data(&state).map_err(Into::into)
 }

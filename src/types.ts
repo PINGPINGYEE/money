@@ -155,3 +155,10 @@ export interface ReturnPayload {
   note?: string | null;
   override_amount?: number | null;
 }
+
+export interface ReturnUpdatePayload {
+  id: number; // return sale id
+  qty: number;
+  note?: string | null;
+  override_amount?: number | null;
+}
