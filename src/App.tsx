@@ -256,6 +256,8 @@ function App() {
   const [customerListQuery, setCustomerListQuery] = useState("");
   const [creditOverviewQuery, setCreditOverviewQuery] = useState("");
   const [creditHistoryQuery, setCreditHistoryQuery] = useState("");
+  const [creditHistoryStartDate, setCreditHistoryStartDate] = useState("");
+  const [creditHistoryEndDate, setCreditHistoryEndDate] = useState("");
   const [saleEdit, setSaleEdit] = useState<null | {
     id: number;
     qty: string;
@@ -464,6 +466,32 @@ function App() {
       a.ts < b.ts ? 1 : -1,
     );
   }, [filteredSales, filteredPayments]);
+
+  // 각 외상/결제 이벤트 시점의 고객별 남은 잔액(누적)에 대한 맵 (entryId -> outstandingAfter)
+  const creditOutstandingById = useMemo(() => {
+    const map = new Map<number, number>();
+    if (!data) return map;
+    const byCustomer = new Map<number, CreditEntry[]>();
+    // 시간 오름차순으로 정렬 후 고객별로 누적
+    const sorted = [...data.credits].sort((a, b) => (a.ts < b.ts ? -1 : a.ts > b.ts ? 1 : 0));
+    for (const entry of sorted) {
+      const arr = byCustomer.get(entry.customer_id) ?? [];
+      arr.push(entry);
+      byCustomer.set(entry.customer_id, arr);
+    }
+    byCustomer.forEach((entries) => {
+      let outstanding = 0;
+      for (const e of entries) {
+        if (e.is_payment) {
+          outstanding = Math.max(outstanding - e.amount, 0);
+        } else {
+          outstanding += e.amount;
+        }
+        map.set(e.id, outstanding);
+      }
+    });
+    return map;
+  }, [data]);
 
   const returnsBySale = useMemo(() => {
     const map = new Map<number, number>();
@@ -2796,8 +2824,21 @@ const handleCustomerSubmit = async (event: FormEvent<HTMLFormElement>) => {
 
     // Filter: 외상/결제 히스토리
     const historyTerm = creditHistoryQuery.trim().toLowerCase();
+    const startTime = creditHistoryStartDate
+      ? new Date(`${creditHistoryStartDate}T00:00:00`).getTime()
+      : null;
+    const endTime = creditHistoryEndDate
+      ? new Date(`${creditHistoryEndDate}T23:59:59`).getTime()
+      : null;
     const filteredCredits = historyTerm
       ? data.credits.filter((entry) => {
+          // date range
+          const t = new Date(entry.ts).getTime();
+          if (Number.isFinite(t)) {
+            if (startTime && t < startTime) return false;
+            if (endTime && t > endTime) return false;
+          }
+          // name/phone filter
           const name = (entry.customer_name ?? "").toLowerCase();
           const phoneDigits = (entry.customer_phone ?? "").replace(/\D/g, "");
           const termDigits = historyTerm.replace(/\D/g, "");
@@ -2807,7 +2848,14 @@ const handleCustomerSubmit = async (event: FormEvent<HTMLFormElement>) => {
           const hasParenDigits = /\(\s*\d{2,}\s*\)/.test(historyTerm);
           return hasParenDigits ? nameMatches && phoneMatches : nameMatches || phoneMatches;
         })
-      : data.credits;
+      : data.credits.filter((entry) => {
+          const t = new Date(entry.ts).getTime();
+          if (Number.isFinite(t)) {
+            if (startTime && t < startTime) return false;
+            if (endTime && t > endTime) return false;
+          }
+          return true;
+        });
 
     const totalHistories = filteredCredits.length;
     const totalHistoryPages = Math.max(1, Math.ceil(totalHistories / historyPageSize));
@@ -2982,9 +3030,22 @@ const handleCustomerSubmit = async (event: FormEvent<HTMLFormElement>) => {
         <div className="panel">
           <h2>외상/결제 히스토리</h2>
           <div className="subtitle" style={{ display: "flex", gap: 12, alignItems: "center" }}>
-            <span>
-              페이지 {currentHistoryPage} / {totalHistoryPages}
-            </span>
+            <input
+              type="date"
+              value={creditHistoryStartDate}
+              onChange={(e) => {
+                setCreditHistoryStartDate(e.target.value);
+                setCreditHistoryPage(1);
+              }}
+            />
+            <input
+              type="date"
+              value={creditHistoryEndDate}
+              onChange={(e) => {
+                setCreditHistoryEndDate(e.target.value);
+                setCreditHistoryPage(1);
+              }}
+            />
             <input
               type="text"
               value={creditHistoryQuery}
@@ -2996,6 +3057,41 @@ const handleCustomerSubmit = async (event: FormEvent<HTMLFormElement>) => {
               list="credit-history-customer-suggestions"
               style={{ maxWidth: 220 }}
             />
+            <button
+              type="button"
+              onClick={() => {
+                // 조회 버튼: 페이지 1로 이동하여 반영
+                setCreditHistoryPage(1);
+              }}
+            >
+              조회
+            </button>
+            <button
+              type="button"
+              className="ghost"
+              onClick={() => {
+                if (!filteredCredits.length) return;
+                const rows = filteredCredits.map((entry) => {
+                  const outstanding = String(creditOutstandingById.get(entry.id) ?? 0);
+                  return [
+                    formatDateTime(entry.ts),
+                    entry.is_payment ? "외상 결제" : "외상",
+                    String(entry.customer_name ?? ""),
+                    String(entry.customer_phone ?? ""),
+                    String(entry.amount),
+                    entry.sale_id != null ? String(entry.sale_id) : "",
+                    outstanding,
+                    String(entry.note ?? ""),
+                  ];
+                });
+                exportToCsv("credit-history.csv", [
+                  ["일시", "유형", "고객", "연락처", "금액", "관련 판매", "남은 잔액", "비고"],
+                  ...rows,
+                ]);
+              }}
+            >
+              CSV 내보내기
+            </button>
             <datalist id="credit-history-customer-suggestions">
               {data.customers
                 .filter((c) => {
@@ -3023,6 +3119,7 @@ const handleCustomerSubmit = async (event: FormEvent<HTMLFormElement>) => {
                   <th>고객</th>
                   <th>유형</th>
                   <th>금액</th>
+                  <th>남은 잔액</th>
                   <th>관련 판매</th>
                   <th>비고</th>
                 </tr>
@@ -3045,35 +3142,15 @@ const handleCustomerSubmit = async (event: FormEvent<HTMLFormElement>) => {
                       )}
                     </td>
                     <td>{formatCurrency(entry.amount)}</td>
+                    <td>
+                      {formatCurrency(creditOutstandingById.get(entry.id) ?? 0)}
+                    </td>
                     <td>{entry.sale_id ?? "-"}</td>
                     <td>{entry.note ?? "-"}</td>
                   </tr>
                 ))}
               </tbody>
             </table>
-          </div>
-          <div className="form-actions">
-            <button
-              type="button"
-              className="secondary"
-              onClick={() => setCreditHistoryPage((p) => Math.max(1, p - 1))}
-              disabled={currentHistoryPage <= 1}
-            >
-              이전
-            </button>
-            <span style={{ margin: "0 8px" }}>
-              페이지 {currentHistoryPage} / {totalHistoryPages}
-            </span>
-            <button
-              type="button"
-              className="secondary"
-              onClick={() =>
-                setCreditHistoryPage((p) => Math.min(totalHistoryPages, p + 1))
-              }
-              disabled={currentHistoryPage >= totalHistoryPages}
-            >
-              다음
-            </button>
           </div>
         </div>
       </div>
@@ -3140,29 +3217,6 @@ const handleCustomerSubmit = async (event: FormEvent<HTMLFormElement>) => {
                 ))}
               </tbody>
             </table>
-          </div>
-          <div className="form-actions">
-            <button
-              type="button"
-              className="secondary"
-              onClick={() => setCreditHistoryPage((p) => Math.max(1, p - 1))}
-              disabled={currentHistoryPage <= 1}
-            >
-              이전
-            </button>
-            <span style={{ margin: "0 8px" }}>
-              페이지 {currentHistoryPage} / {totalHistoryPages}
-            </span>
-            <button
-              type="button"
-              className="secondary"
-              onClick={() =>
-                setCreditHistoryPage((p) => Math.min(totalHistoryPages, p + 1))
-              }
-              disabled={currentHistoryPage >= totalHistoryPages}
-            >
-              다음
-            </button>
           </div>
         </div>
 
