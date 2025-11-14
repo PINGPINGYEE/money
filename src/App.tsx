@@ -27,7 +27,6 @@ type TabKey =
   | "products"
   | "customers"
   | "sales"
-  | "stock"
   | "ledger"
   | "credit"
   | "reports";
@@ -36,7 +35,6 @@ type ProductFormState = {
   mode: "create" | "edit";
   id?: number;
   name: string;
-  sku: string;
   unit_price: string;
   low_stock_threshold: string;
   initial_qty: string;
@@ -149,7 +147,6 @@ function createEmptyProductForm(): ProductFormState {
   return {
     mode: "create",
     name: "",
-    sku: "",
     unit_price: "",
     low_stock_threshold: "5",
     initial_qty: "",
@@ -238,11 +235,14 @@ function App() {
   const [stockForm, setStockForm] =
     useState<StockFormState>(createEmptyStockForm);
   const [stockProductQuery, setStockProductQuery] = useState("");
-  const [stockCustomerQuery, setStockCustomerQuery] = useState("");
   const [paymentForm, setPaymentForm] = useState<PaymentFormState>(
     createEmptyPaymentForm,
   );
   const [creditCustomerQuery, setCreditCustomerQuery] = useState("");
+  const [productStockPage, setProductStockPage] = useState(1);
+  const [productListPage, setProductListPage] = useState(1);
+  const [productListQuery, setProductListQuery] = useState("");
+  const [pendingDeleteProduct, setPendingDeleteProduct] = useState<Product | null>(null);
   const [ledgerFilter, setLedgerFilter] =
     useState<LedgerFilterState>(createEmptyLedgerFilter);
 
@@ -299,9 +299,7 @@ function App() {
     }
     const q = saleProductQuery.trim().toLowerCase();
     if (!q) return data.products;
-    return data.products.filter((p) =>
-      p.name.toLowerCase().includes(q) || (p.sku?.toLowerCase().includes(q) ?? false),
-    );
+    return data.products.filter((p) => p.name.toLowerCase().includes(q));
   }, [data, saleProductQuery]);
 
   const customerListForSale = useMemo(() => {
@@ -747,21 +745,10 @@ function App() {
     if (!data) return [] as Product[];
     const q = stockProductQuery.trim().toLowerCase();
     if (!q) return data.products;
-    return data.products.filter((p) =>
-      p.name.toLowerCase().includes(q) || (p.sku?.toLowerCase().includes(q) ?? false),
-    );
+    return data.products.filter((p) => p.name.toLowerCase().includes(q));
   }, [data, stockProductQuery]);
 
-  const customerListForStock = useMemo(() => {
-    if (!data) return [] as Customer[];
-    const q = stockCustomerQuery.trim().toLowerCase();
-    if (!q) return data.customers;
-    return data.customers.filter((c) => {
-      const nameHit = c.name.toLowerCase().includes(q);
-      const phoneHit = (c.phone ?? "").toLowerCase().includes(q);
-      return nameHit || phoneHit;
-    });
-  }, [data, stockCustomerQuery]);
+  // (고객 기반 출고 입력은 제거됨)
 
   const handleProductSubmit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -778,7 +765,6 @@ function App() {
     if (productForm.mode === "create") {
       const payload = {
         name: productForm.name.trim(),
-        sku: sanitizeNullable(productForm.sku),
         unit_price: unitPrice,
         note: sanitizeNullable(productForm.note),
         low_stock_threshold: productForm.low_stock_threshold
@@ -796,7 +782,6 @@ function App() {
       const payload = {
         id: productForm.id,
         name: productForm.name.trim(),
-        sku: sanitizeNullable(productForm.sku),
         unit_price: unitPrice,
         note: sanitizeNullable(productForm.note),
         low_stock_threshold: productForm.low_stock_threshold
@@ -837,7 +822,6 @@ function App() {
       mode: "edit",
       id: product.id,
       name: product.name,
-      sku: product.sku ?? "",
       unit_price: product.unit_price.toString(),
       low_stock_threshold: product.low_stock_threshold.toString(),
       initial_qty: "",
@@ -847,6 +831,12 @@ function App() {
   };
 
   const handleProductDelete = async (product: Product) => {
+    setPendingDeleteProduct(product);
+  };
+
+  const confirmProductDelete = async () => {
+    if (!pendingDeleteProduct) return;
+    const product = pendingDeleteProduct;
     const result = await runAction(() => deleteProduct(product.id));
     if (
       result &&
@@ -855,6 +845,7 @@ function App() {
     ) {
       setProductForm(createEmptyProductForm());
     }
+    setPendingDeleteProduct(null);
   };
 
 const handleCustomerSubmit = async (event: FormEvent<HTMLFormElement>) => {
@@ -1094,7 +1085,6 @@ const handleCustomerSubmit = async (event: FormEvent<HTMLFormElement>) => {
     }
     const rows = data.products.map((product) => [
       product.name,
-      product.sku ?? "",
       product.qty.toString(),
       product.unit_price.toString(),
       (product.qty * product.unit_price).toString(),
@@ -1102,7 +1092,7 @@ const handleCustomerSubmit = async (event: FormEvent<HTMLFormElement>) => {
       product.note ?? "",
     ]);
     exportToCsv("inventory.csv", [
-      ["상품명", "SKU", "재고", "단가", "재고 가치", "저재고 기준", "비고"],
+      ["상품명", "재고", "단가", "재고 가치", "저재고 기준", "비고"],
       ...rows,
     ]);
   };
@@ -1158,6 +1148,164 @@ const handleCustomerSubmit = async (event: FormEvent<HTMLFormElement>) => {
     if (!data) {
       return null;
     }
+    const productPageSize = 5;
+    const productQuery = productListQuery.trim().toLowerCase();
+    const filteredProducts = productQuery
+      ? data.products
+          .filter((p) => p.name.toLowerCase().includes(productQuery))
+          .slice()
+          .sort((a, b) => {
+            const an = a.name ?? "";
+            const bn = b.name ?? "";
+            const aStarts = an.toLowerCase().startsWith(productQuery);
+            const bStarts = bn.toLowerCase().startsWith(productQuery);
+            if (aStarts !== bStarts) {
+              return aStarts ? -1 : 1; // 시작 일치 우선
+            }
+            return an.localeCompare(bn, "ko", { sensitivity: "base" });
+          })
+      : data.products;
+    const totalProducts = filteredProducts.length;
+    const totalProductPages = Math.max(1, Math.ceil(totalProducts / productPageSize));
+    const currentProductPage = Math.min(productListPage, totalProductPages);
+    const productStart = (currentProductPage - 1) * productPageSize;
+    const pagedProducts = filteredProducts.slice(productStart, productStart + productPageSize);
+    const pageSize = 10;
+    const totalMovements = data.stock_movements.length;
+    const totalMovementPages = Math.max(1, Math.ceil(totalMovements / pageSize));
+    const currentMovementPage = Math.min(productStockPage, totalMovementPages);
+    const movementStart = (currentMovementPage - 1) * pageSize;
+    const pagedMovements: StockMovement[] = data.stock_movements.slice(
+      movementStart,
+      movementStart + pageSize,
+    );
+    const productFormPanel = (
+      <div className="panel">
+        <div className="panel-header">
+          <h2>
+            {productForm.mode === "create" ? "상품 등록" : "상품 수정"}
+          </h2>
+          {productForm.mode === "edit" && (
+            <button
+              type="button"
+              className="ghost"
+              onClick={() => setProductForm(createEmptyProductForm())}
+              disabled={loading}
+            >
+              새 상품 추가로 전환
+            </button>
+          )}
+        </div>
+        <form onSubmit={handleProductSubmit} className="form-grid">
+          <label>
+            상품명
+            <input
+              type="text"
+              value={productForm.name}
+              onChange={(event) =>
+                setProductForm((prev) => ({
+                  ...prev,
+                  name: event.target.value,
+                }))
+              }
+              placeholder="상품명"
+            />
+          </label>
+          {productForm.mode === "edit" && (
+            <label>
+              재고
+              <input
+                type="number"
+                min="0"
+                step="0.01"
+                value={productForm.qty}
+                onChange={(event) =>
+                  setProductForm((prev) => ({
+                    ...prev,
+                    qty: event.target.value,
+                  }))
+                }
+                placeholder="현재 재고"
+              />
+            </label>
+          )}
+          <label>
+            미터당 단가 (원)
+            <input
+              type="number"
+              min="0"
+              step="0.01"
+              value={productForm.unit_price}
+              onChange={(event) =>
+                setProductForm((prev) => ({
+                  ...prev,
+                  unit_price: event.target.value,
+                }))
+              }
+            />
+          </label>
+          <label>
+            저재고 기준
+            <input
+              type="number"
+              min="0"
+              step="1"
+              value={productForm.low_stock_threshold}
+              onChange={(event) =>
+                setProductForm((prev) => ({
+                  ...prev,
+                  low_stock_threshold: event.target.value,
+                }))
+              }
+            />
+          </label>
+          {productForm.mode === "create" && (
+            <label>
+              초기 재고
+              <input
+                type="number"
+                min="0"
+                step="0.01"
+                value={productForm.initial_qty}
+                onChange={(event) =>
+                  setProductForm((prev) => ({
+                    ...prev,
+                    initial_qty: event.target.value,
+                  }))
+                }
+                placeholder="선택 입력"
+              />
+            </label>
+          )}
+          <label className="span-2">
+            메모
+            <textarea
+              value={productForm.note}
+              onChange={(event) =>
+                setProductForm((prev) => ({
+                  ...prev,
+                  note: event.target.value,
+                }))
+              }
+              placeholder="예) 보관 위치, 유통기한 등"
+            />
+          </label>
+          <div className="form-actions">
+            <button type="submit" disabled={loading}>
+              {productForm.mode === "create" ? "상품 추가" : "수정 완료"}
+            </button>
+            <button
+              type="button"
+              className="secondary"
+              onClick={() => setProductForm(createEmptyProductForm())}
+              disabled={loading}
+            >
+              초기화
+            </button>
+          </div>
+        </form>
+      </div>
+    );
     return (
       <div className="tab-layout">
         <div className="panel">
@@ -1168,6 +1316,16 @@ const handleCustomerSubmit = async (event: FormEvent<HTMLFormElement>) => {
                 현재 {data.products.length}개의 상품을 관리하고 있습니다.
               </p>
             </div>
+            <input
+              type="text"
+              value={productListQuery}
+              onChange={(event) => {
+                setProductListQuery(event.target.value);
+                setProductListPage(1);
+              }}
+              placeholder="상품명 검색"
+              style={{ maxWidth: "200px" }}
+            />
             <button
               type="button"
               className="ghost"
@@ -1181,7 +1339,6 @@ const handleCustomerSubmit = async (event: FormEvent<HTMLFormElement>) => {
               <thead>
                 <tr>
                   <th>상품명</th>
-                  <th>SKU</th>
                   <th>재고</th>
                   <th>미터당 단가</th>
                   <th>재고 가치</th>
@@ -1191,7 +1348,7 @@ const handleCustomerSubmit = async (event: FormEvent<HTMLFormElement>) => {
                 </tr>
               </thead>
               <tbody>
-                {data.products.map((product) => {
+                {pagedProducts.map((product) => {
                   const isLowStock =
                     product.qty <= product.low_stock_threshold;
                   return (
@@ -1209,7 +1366,6 @@ const handleCustomerSubmit = async (event: FormEvent<HTMLFormElement>) => {
                           )}
                         </div>
                       </td>
-                      <td>{product.sku ?? "-"}</td>
                       <td>{formatNumber(product.qty)}</td>
                       <td>{formatCurrency(product.unit_price)}</td>
                       <td>{formatCurrency(product.qty * product.unit_price)}</td>
@@ -1239,149 +1395,224 @@ const handleCustomerSubmit = async (event: FormEvent<HTMLFormElement>) => {
               </tbody>
             </table>
           </div>
+          <div className="form-actions">
+            <button
+              type="button"
+              className="secondary"
+              onClick={() => setProductListPage((p) => Math.max(1, p - 1))}
+              disabled={currentProductPage <= 1}
+            >
+              이전
+            </button>
+            <span style={{ margin: "0 8px" }}>
+              페이지 {currentProductPage} / {totalProductPages}
+            </span>
+            <button
+              type="button"
+              className="secondary"
+              onClick={() =>
+                setProductListPage((p) => Math.min(totalProductPages, p + 1))
+              }
+              disabled={currentProductPage >= totalProductPages}
+            >
+              다음
+            </button>
+          </div>
 
           {/* 저재고 알림 패널 제거 (상품 표 내부 배지 표시만 유지) */}
         </div>
 
+        {productForm.mode === "edit" && productFormPanel}
+
         <div className="panel">
           <div className="panel-header">
-            <h2>
-              {productForm.mode === "create" ? "상품 등록" : "상품 수정"}
-            </h2>
-            {productForm.mode === "edit" && (
-              <button
-                type="button"
-                className="ghost"
-                onClick={() => setProductForm(createEmptyProductForm())}
-                disabled={loading}
-              >
-                새 상품 추가로 전환
-              </button>
-            )}
+            <div>
+              <h2>입고 기록</h2>
+              <p className="subtitle">
+                입고(IN) 내역을 기록합니다.
+              </p>
+            </div>
           </div>
-          <form onSubmit={handleProductSubmit} className="form-grid">
+          <form onSubmit={handleStockSubmit} className="form-grid">
             <label>
-              상품명
+              상품
               <input
                 type="text"
-                value={productForm.name}
+                value={stockProductQuery}
+                onChange={(event) => setStockProductQuery(event.target.value)}
+                placeholder="상품명 검색"
+              />
+              <select
+                value={stockForm.product_id}
                 onChange={(event) =>
-                  setProductForm((prev) => ({
+                  setStockForm((prev) => ({
                     ...prev,
-                    name: event.target.value,
+                    product_id: event.target.value,
                   }))
                 }
-                placeholder="상품명"
-              />
+              >
+                <option value="">상품 선택</option>
+                {productListForStock.map((product) => (
+                  <option key={product.id} value={product.id}>
+                    {product.name}
+                  </option>
+                ))}
+              </select>
             </label>
-            {productForm.mode === "edit" ? (
-              <label>
-                재고
-                <input
-                  type="number"
-                  min="0"
-                  step="0.01"
-                  value={productForm.qty}
-                  onChange={(event) =>
-                    setProductForm((prev) => ({
-                      ...prev,
-                      qty: event.target.value,
-                    }))
-                  }
-                  placeholder="현재 재고"
-                />
-              </label>
-            ) : (
-              <label>
-                SKU / 바코드
-                <input
-                  type="text"
-                  value={productForm.sku}
-                  onChange={(event) =>
-                    setProductForm((prev) => ({
-                      ...prev,
-                      sku: event.target.value,
-                    }))
-                  }
-                  placeholder="선택 입력"
-                />
-              </label>
-            )}
             <label>
-              미터당 단가 (원)
+              미터
               <input
                 type="number"
                 min="0"
                 step="0.01"
-                value={productForm.unit_price}
+                value={stockForm.qty}
                 onChange={(event) =>
-                  setProductForm((prev) => ({
+                  setStockForm((prev) => ({
                     ...prev,
-                    unit_price: event.target.value,
+                    qty: event.target.value,
                   }))
                 }
               />
             </label>
             <label>
-              저재고 기준
+              단가 (원)
               <input
                 type="number"
                 min="0"
-                step="1"
-                value={productForm.low_stock_threshold}
+                step="0.01"
+                value={stockForm.unit_price}
                 onChange={(event) =>
-                  setProductForm((prev) => ({
+                  setStockForm((prev) => ({
                     ...prev,
-                    low_stock_threshold: event.target.value,
+                    unit_price: event.target.value,
                   }))
                 }
+                placeholder="선택 입력"
               />
             </label>
-            {productForm.mode === "create" && (
-              <label>
-                초기 재고
-                <input
-                  type="number"
-                  min="0"
-                  step="0.01"
-                  value={productForm.initial_qty}
-                  onChange={(event) =>
-                    setProductForm((prev) => ({
-                      ...prev,
-                      initial_qty: event.target.value,
-                    }))
-                  }
-                  placeholder="선택 입력"
-                />
-              </label>
-            )}
+            <label>
+              거래처
+              <input
+                type="text"
+                value={stockForm.counterparty}
+                onChange={(event) =>
+                  setStockForm((prev) => ({
+                    ...prev,
+                    counterparty: event.target.value,
+                  }))
+                }
+                placeholder="선택 입력"
+              />
+            </label>
             <label className="span-2">
               메모
               <textarea
-                value={productForm.note}
+                value={stockForm.note}
                 onChange={(event) =>
-                  setProductForm((prev) => ({
+                  setStockForm((prev) => ({
                     ...prev,
                     note: event.target.value,
                   }))
                 }
-                placeholder="예) 보관 위치, 유통기한 등"
+                placeholder="비고"
               />
             </label>
             <div className="form-actions">
               <button type="submit" disabled={loading}>
-                {productForm.mode === "create" ? "상품 추가" : "수정 완료"}
+                입고 기록
               </button>
               <button
                 type="button"
                 className="secondary"
-                onClick={() => setProductForm(createEmptyProductForm())}
+                onClick={() => setStockForm(createEmptyStockForm())}
                 disabled={loading}
               >
                 초기화
               </button>
             </div>
           </form>
+        </div>
+
+        {productForm.mode !== "edit" && productFormPanel}
+
+        <div className="panel">
+          <div className="panel-header">
+            <h2>최근 입·출고 내역</h2>
+            <p className="subtitle">페이지 {currentMovementPage} / {totalMovementPages}</p>
+          </div>
+          <div className="table-wrapper">
+            <table>
+              <thead>
+                <tr>
+                  <th>일시</th>
+                  <th>구분</th>
+                  <th>상품</th>
+                  <th>미터</th>
+                  <th>단가</th>
+                  <th>총액</th>
+                  <th>거래처</th>
+                  <th>비고</th>
+                </tr>
+              </thead>
+              <tbody>
+                {pagedMovements.map((movement) => (
+                  <tr key={movement.id}>
+                    <td>{formatDateTime(movement.ts)}</td>
+                    <td>
+                      {movement.kind === "IN" ? (
+                        <span className="badge">입고</span>
+                      ) : movement.kind === "OUT" ? (
+                        <span className="badge badge-warning">출고</span>
+                      ) : (
+                        <span className="badge badge-return">반품</span>
+                      )}
+                    </td>
+                    <td>{movement.product_name}</td>
+                    <td>{formatNumber(movement.qty)}</td>
+                    <td>
+                      {movement.unit_price != null
+                        ? formatCurrency(movement.unit_price)
+                        : "-"}
+                    </td>
+                    <td>
+                      {movement.total_amount != null
+                        ? formatCurrency(movement.total_amount)
+                        : "-"}
+                    </td>
+                    <td>
+                      {movement.customer_name ??
+                        movement.counterparty ??
+                        "-"}
+                    </td>
+                    <td>{movement.note ?? "-"}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <div className="form-actions">
+            <button
+              type="button"
+              className="secondary"
+              onClick={() => setProductStockPage((p) => Math.max(1, p - 1))}
+              disabled={currentMovementPage <= 1}
+            >
+              이전
+            </button>
+            <button
+              type="button"
+              className="secondary"
+              onClick={() =>
+                setProductStockPage((p) => Math.min(totalMovementPages, p + 1))
+              }
+              disabled={currentMovementPage >= totalMovementPages}
+            >
+              다음
+            </button>
+            <button type="button" className="ghost" onClick={handleExportStock}>
+              입출고 CSV 내보내기
+            </button>
+          </div>
         </div>
       </div>
     );
@@ -1959,224 +2190,7 @@ const handleCustomerSubmit = async (event: FormEvent<HTMLFormElement>) => {
     );
   };
 
-  const renderStock = () => {
-    if (!data) {
-      return null;
-    }
-    const recentMovements: StockMovement[] = data.stock_movements.slice(0, 30);
-    return (
-      <div className="tab-layout">
-        <div className="panel">
-          <div className="panel-header">
-            <div>
-              <h2>입·출고 기록</h2>
-              <p className="subtitle">
-                입고(IN) / 기타 출고(OUT) 내역을 기록합니다.
-              </p>
-            </div>
-          </div>
-          <form onSubmit={handleStockSubmit} className="form-grid">
-            <label>
-              상품
-              <input
-                type="text"
-                value={stockProductQuery}
-                onChange={(event) => setStockProductQuery(event.target.value)}
-                placeholder="상품명/SKU 검색"
-              />
-              <select
-                value={stockForm.product_id}
-                onChange={(event) =>
-                  setStockForm((prev) => ({
-                    ...prev,
-                    product_id: event.target.value,
-                  }))
-                }
-              >
-                <option value="">상품 선택</option>
-                {productListForStock.map((product) => (
-                  <option key={product.id} value={product.id}>
-                    {product.name}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label>
-              구분
-              <select
-                value={stockForm.kind}
-                onChange={(event) =>
-                  setStockForm((prev) => ({
-                    ...prev,
-                    kind: event.target.value as StockFormState["kind"],
-                  }))
-                }
-              >
-                <option value="IN">입고</option>
-                <option value="OUT">출고</option>
-              </select>
-            </label>
-            <label>
-              미터
-              <input
-                type="number"
-                min="0"
-                step="0.01"
-                value={stockForm.qty}
-                onChange={(event) =>
-                  setStockForm((prev) => ({
-                    ...prev,
-                    qty: event.target.value,
-                  }))
-                }
-              />
-            </label>
-            <label>
-              단가 (원)
-              <input
-                type="number"
-                min="0"
-                step="0.01"
-                value={stockForm.unit_price}
-                onChange={(event) =>
-                  setStockForm((prev) => ({
-                    ...prev,
-                    unit_price: event.target.value,
-                  }))
-                }
-                placeholder="선택 입력"
-              />
-            </label>
-            <label>
-              거래처 / 출고처
-              <input
-                type="text"
-                value={stockForm.counterparty}
-                onChange={(event) =>
-                  setStockForm((prev) => ({
-                    ...prev,
-                    counterparty: event.target.value,
-                  }))
-                }
-                placeholder="선택 입력"
-              />
-            </label>
-            <label>
-              고객 (출고 시)
-              <input
-                type="text"
-                value={stockCustomerQuery}
-                onChange={(event) => setStockCustomerQuery(event.target.value)}
-                placeholder="이름/연락처 검색"
-              />
-              <select
-                value={stockForm.customer_id}
-                onChange={(event) =>
-                  setStockForm((prev) => ({
-                    ...prev,
-                    customer_id: event.target.value,
-                  }))
-                }
-              >
-                <option value="">선택 안 함</option>
-                {customerListForStock.map((customer) => (
-                  <option key={customer.id} value={customer.id}>
-                    {formatNameWithPhone(customer.name, customer.phone)}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label className="span-2">
-              메모
-              <textarea
-                value={stockForm.note}
-                onChange={(event) =>
-                  setStockForm((prev) => ({
-                    ...prev,
-                    note: event.target.value,
-                  }))
-                }
-                placeholder="비고"
-              />
-            </label>
-            <div className="form-actions">
-              <button type="submit" disabled={loading}>
-                입·출고 기록
-              </button>
-              <button
-                type="button"
-                className="secondary"
-                onClick={() => setStockForm(createEmptyStockForm())}
-                disabled={loading}
-              >
-                초기화
-              </button>
-            </div>
-          </form>
-        </div>
-
-        <div className="panel">
-          <div className="panel-header">
-            <h2>최근 입·출고 내역</h2>
-            <p className="subtitle">최신 {recentMovements.length}건 표시</p>
-          </div>
-          <div className="table-wrapper">
-            <table>
-              <thead>
-                <tr>
-                  <th>일시</th>
-                  <th>구분</th>
-                  <th>상품</th>
-                  <th>미터</th>
-                  <th>단가</th>
-                  <th>총액</th>
-                  <th>거래처</th>
-                  <th>비고</th>
-                </tr>
-              </thead>
-              <tbody>
-                {recentMovements.map((movement) => (
-                  <tr key={movement.id}>
-                    <td>{formatDateTime(movement.ts)}</td>
-                    <td>
-                      {movement.kind === "IN" ? (
-                        <span className="badge">입고</span>
-                      ) : movement.kind === "OUT" ? (
-                        <span className="badge badge-warning">출고</span>
-                      ) : (
-                        <span className="badge badge-return">반품</span>
-                      )}
-                    </td>
-                    <td>{movement.product_name}</td>
-                    <td>{formatNumber(movement.qty)}</td>
-                    <td>
-                      {movement.unit_price != null
-                        ? formatCurrency(movement.unit_price)
-                        : "-"}
-                    </td>
-                    <td>
-                      {movement.total_amount != null
-                        ? formatCurrency(movement.total_amount)
-                        : "-"}
-                    </td>
-                    <td>
-                      {movement.customer_name ??
-                        movement.counterparty ??
-                        "-"}
-                    </td>
-                    <td>{movement.note ?? "-"}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-          <button type="button" className="ghost" onClick={handleExportStock}>
-            입출고 CSV 내보내기
-          </button>
-        </div>
-      </div>
-    );
-  };
+  // (입·출고 탭은 상품 탭으로 통합되었습니다)
 
   const renderLedger = () => {
     if (!data) {
@@ -2260,7 +2274,7 @@ const handleCustomerSubmit = async (event: FormEvent<HTMLFormElement>) => {
                     product: event.target.value,
                   }))
                 }
-                placeholder="상품명/SKU 검색"
+                placeholder="상품명 검색"
                 list="ledger-product-suggestions"
               />
               <datalist id="ledger-product-suggestions">
@@ -2268,16 +2282,11 @@ const handleCustomerSubmit = async (event: FormEvent<HTMLFormElement>) => {
                   .filter((p) => {
                     const q = ledgerFilter.product.trim().toLowerCase();
                     if (!q) return false;
-                    return (
-                      p.name.toLowerCase().includes(q) ||
-                      ((p.sku ?? "").toLowerCase().includes(q))
-                    );
+                    return p.name.toLowerCase().includes(q);
                   })
                   .slice(0, 10)
                   .map((p) => (
-                    <option key={p.id} value={p.name}>
-                      {p.sku ? `${p.name} (${p.sku})` : p.name}
-                    </option>
+                    <option key={p.id} value={p.name} />
                   ))}
               </datalist>
             </label>
@@ -2768,7 +2777,6 @@ const handleCustomerSubmit = async (event: FormEvent<HTMLFormElement>) => {
           { key: "products", label: "상품" },
           { key: "customers", label: "고객" },
           { key: "sales", label: "판매" },
-          { key: "stock", label: "입출고" },
           { key: "ledger", label: "장부" },
           { key: "credit", label: "외상" },
           { key: "reports", label: "보고서" },
@@ -2797,7 +2805,6 @@ const handleCustomerSubmit = async (event: FormEvent<HTMLFormElement>) => {
           {tab === "products" && renderProducts()}
           {tab === "customers" && renderCustomers()}
           {tab === "sales" && renderSales()}
-          {tab === "stock" && renderStock()}
           {tab === "ledger" && renderLedger()}
           {tab === "credit" && renderCredit()}
           {tab === "reports" && renderReports()}
@@ -2805,6 +2812,57 @@ const handleCustomerSubmit = async (event: FormEvent<HTMLFormElement>) => {
       )}
 
       {loading && <div className="loading-indicator">처리 중...</div>}
+
+      {pendingDeleteProduct && (
+        <div
+          style={{
+            position: "fixed",
+            inset: 0,
+            background: "rgba(0,0,0,0.4)",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            zIndex: 9999,
+          }}
+          role="dialog"
+          aria-modal="true"
+        >
+          <div
+            className="panel"
+            style={{ maxWidth: 480, width: "90%", boxShadow: "0 8px 24px rgba(0,0,0,0.2)" }}
+          >
+            <div className="panel-header">
+              <h2>상품 삭제 확인</h2>
+            </div>
+            <div style={{ padding: "12px 16px" }}>
+              <p>
+                <strong>{pendingDeleteProduct.name}</strong> 상품을 삭제하시겠습니까?
+              </p>
+              <p className="subtitle">
+                삭제 후에도 기존 판매/입고/반품 기록은 그대로 남습니다.
+              </p>
+            </div>
+            <div className="form-actions" style={{ padding: "0 16px 16px" }}>
+              <button
+                type="button"
+                className="danger"
+                onClick={() => void confirmProductDelete()}
+                disabled={loading}
+              >
+                삭제
+              </button>
+              <button
+                type="button"
+                className="secondary"
+                onClick={() => setPendingDeleteProduct(null)}
+                disabled={loading}
+              >
+                취소
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
