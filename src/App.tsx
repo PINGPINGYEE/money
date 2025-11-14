@@ -18,6 +18,7 @@ import type {
   AppData,
   Customer,
   CustomerBalance,
+  CreditEntry,
   Product,
   SaleRecord,
   StockMovement,
@@ -243,6 +244,10 @@ function App() {
   const [productListPage, setProductListPage] = useState(1);
   const [productListQuery, setProductListQuery] = useState("");
   const [pendingDeleteProduct, setPendingDeleteProduct] = useState<Product | null>(null);
+  const [ledgerDetailsPage, setLedgerDetailsPage] = useState(1);
+  const [creditHistoryPage, setCreditHistoryPage] = useState(1);
+  const [saleHistoryPage, setSaleHistoryPage] = useState(1);
+  const [saleHistoryQuery, setSaleHistoryQuery] = useState("");
   const [ledgerFilter, setLedgerFilter] =
     useState<LedgerFilterState>(createEmptyLedgerFilter);
 
@@ -365,6 +370,77 @@ function App() {
       return true;
     });
   }, [data, ledgerFilter]);
+
+  const filteredPayments = useMemo(() => {
+    if (!data) {
+      return [];
+    }
+    const startTime = ledgerFilter.startDate
+      ? new Date(`${ledgerFilter.startDate}T00:00:00`).getTime()
+      : null;
+    const endTime = ledgerFilter.endDate
+      ? new Date(`${ledgerFilter.endDate}T23:59:59`).getTime()
+      : null;
+    const customerTerm = ledgerFilter.customer.trim().toLowerCase();
+    const productTerm = ledgerFilter.product.trim().toLowerCase();
+
+    return data.credits
+      .filter((cr) => cr.is_payment)
+      .filter((cr) => {
+        const tsTime = new Date(cr.ts).getTime();
+        if (!Number.isFinite(tsTime)) {
+          return false;
+        }
+        if (startTime && tsTime < startTime) {
+          return false;
+        }
+        if (endTime && tsTime > endTime) {
+          return false;
+        }
+        if (customerTerm) {
+          const name = (cr.customer_name ?? "").toLowerCase();
+          const phoneDigits = (cr.customer_phone ?? "").replace(/\D/g, "");
+          const term = customerTerm;
+          const termDigits = term.replace(/\D/g, "");
+          const termName = term.replace(/\(.+?\)/g, "").trim();
+          const nameMatches = termName ? name.includes(termName) : false;
+          const phoneMatches = termDigits.length >= 2 ? phoneDigits.includes(termDigits) : false;
+          const hasParenDigits = /\(\s*\d{2,}\s*\)/.test(term);
+          const matches = hasParenDigits ? (nameMatches && phoneMatches) : (nameMatches || phoneMatches);
+          if (!matches) {
+            return false;
+          }
+        }
+        // 제품 필터가 있으면 결제 항목은 제외 (제품과 직접 매칭되지 않음)
+        if (productTerm) {
+          return false;
+        }
+        // "외상 거래만" 체크 시 결제 항목은 제외
+        if (ledgerFilter.onlyCredit) {
+          return false;
+        }
+        return true;
+      });
+  }, [data, ledgerFilter]);
+
+  const ledgerDetails = useMemo(() => {
+    type Detail =
+      | { kind: "sale"; ts: string; sale: SaleRecord }
+      | { kind: "payment"; ts: string; payment: CreditEntry };
+    const saleDetails: Detail[] = filteredSales.map((sale) => ({
+      kind: "sale",
+      ts: sale.ts,
+      sale,
+    }));
+    const paymentDetails: Detail[] = filteredPayments.map((payment) => ({
+      kind: "payment",
+      ts: payment.ts,
+      payment,
+    }));
+    return [...saleDetails, ...paymentDetails].sort((a, b) =>
+      a.ts < b.ts ? 1 : -1,
+    );
+  }, [filteredSales, filteredPayments]);
 
   const returnsBySale = useMemo(() => {
     const map = new Map<number, number>();
@@ -753,7 +829,7 @@ function App() {
   const handleProductSubmit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     if (!productForm.name.trim()) {
-      setError("상품 이름을 입력해주세요.");
+      setError("품명을 입력해주세요.");
       return;
     }
     const unitPrice = parseNumber(productForm.unit_price);
@@ -908,7 +984,7 @@ const handleCustomerSubmit = async (event: FormEvent<HTMLFormElement>) => {
   const handleSaleSubmit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     if (!saleForm.product_id) {
-      setError("판매할 상품을 선택해주세요.");
+      setError("판매할 품명을 선택해주세요.");
       return;
     }
     const productId = Number(saleForm.product_id);
@@ -950,13 +1026,13 @@ const handleCustomerSubmit = async (event: FormEvent<HTMLFormElement>) => {
     }
 
     if (!returnForm.product_id) {
-      setError("반품할 상품을 선택해주세요.");
+      setError("반품할 품명을 선택해주세요.");
       return;
     }
 
     const combo = selectedReturnCombo;
     if (!combo) {
-      setError("선택한 상품 정보를 찾을 수 없습니다.");
+      setError("선택한 품명 정보를 찾을 수 없습니다.");
       return;
     }
 
@@ -993,7 +1069,7 @@ const handleCustomerSubmit = async (event: FormEvent<HTMLFormElement>) => {
   const handleStockSubmit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     if (!stockForm.product_id) {
-      setError("상품을 선택해주세요.");
+      setError("품명을 선택해주세요.");
       return;
     }
     const qty = parseNumber(stockForm.qty);
@@ -1041,27 +1117,46 @@ const handleCustomerSubmit = async (event: FormEvent<HTMLFormElement>) => {
   };
 
   const handleExportLedger = () => {
-    if (!filteredSales.length) {
+    if (!ledgerDetails.length) {
       return;
     }
-    const rows = filteredSales.map((sale) => [
-      formatDateTime(sale.ts),
-      sale.is_return ? "반품" : "판매",
-      sale.customer_name ?? "일반 손님",
-      sale.customer_phone ?? "",
-      sale.product_name,
-      (sale.is_return ? -sale.qty : sale.qty).toString(),
-      sale.unit_price.toString(),
-      (sale.is_return ? -sale.total_amount : sale.total_amount).toString(),
-      sale.is_return
-        ? sale.is_credit
-          ? "외상 정산"
-          : "반품 완료"
-        : sale.is_credit
-        ? "외상"
-        : "완납",
-      sale.note ?? "",
-    ]);
+    const rows = ledgerDetails.map((d) => {
+      if (d.kind === "sale") {
+        const sale = d.sale;
+        return [
+          formatDateTime(sale.ts),
+          sale.is_return ? "반품" : "판매",
+          sale.customer_name ?? "일반 손님",
+          sale.customer_phone ?? "",
+          sale.product_name,
+          (sale.is_return ? -sale.qty : sale.qty).toString(),
+          sale.unit_price.toString(),
+          (sale.is_return ? -sale.total_amount : sale.total_amount).toString(),
+          sale.is_return
+            ? sale.is_credit
+              ? "외상 정산"
+              : "반품 완료"
+            : sale.is_credit
+            ? "외상"
+            : "완납",
+          sale.note ?? "",
+        ];
+      } else {
+        const p = d.payment;
+        return [
+          formatDateTime(p.ts),
+          "외상 결제",
+          p.customer_name,
+          p.customer_phone ?? "",
+          "",
+          "",
+          "",
+          p.amount.toString(),
+          "외상 결제",
+          p.note ?? "",
+        ];
+      }
+    });
     exportToCsv("ledger.csv", [
       [
         "날짜",
@@ -1092,7 +1187,7 @@ const handleCustomerSubmit = async (event: FormEvent<HTMLFormElement>) => {
       product.note ?? "",
     ]);
     exportToCsv("inventory.csv", [
-      ["상품명", "재고", "단가", "재고 가치", "저재고 기준", "비고"],
+      ["품명", "재고", "단가", "재고 가치", "저재고 기준", "비고"],
       ...rows,
     ]);
   };
@@ -1183,7 +1278,7 @@ const handleCustomerSubmit = async (event: FormEvent<HTMLFormElement>) => {
       <div className="panel">
         <div className="panel-header">
           <h2>
-            {productForm.mode === "create" ? "상품 등록" : "상품 수정"}
+            {productForm.mode === "create" ? "품명 등록" : "품명 수정"}
           </h2>
           {productForm.mode === "edit" && (
             <button
@@ -1192,13 +1287,13 @@ const handleCustomerSubmit = async (event: FormEvent<HTMLFormElement>) => {
               onClick={() => setProductForm(createEmptyProductForm())}
               disabled={loading}
             >
-              새 상품 추가로 전환
+                새 품명 추가로 전환
             </button>
           )}
         </div>
         <form onSubmit={handleProductSubmit} className="form-grid">
           <label>
-            상품명
+              품명
             <input
               type="text"
               value={productForm.name}
@@ -1208,7 +1303,7 @@ const handleCustomerSubmit = async (event: FormEvent<HTMLFormElement>) => {
                   name: event.target.value,
                 }))
               }
-              placeholder="상품명"
+              placeholder="품명"
             />
           </label>
           {productForm.mode === "edit" && (
@@ -1292,7 +1387,7 @@ const handleCustomerSubmit = async (event: FormEvent<HTMLFormElement>) => {
           </label>
           <div className="form-actions">
             <button type="submit" disabled={loading}>
-              {productForm.mode === "create" ? "상품 추가" : "수정 완료"}
+              {productForm.mode === "create" ? "품명 추가" : "수정 완료"}
             </button>
             <button
               type="button"
@@ -1311,9 +1406,9 @@ const handleCustomerSubmit = async (event: FormEvent<HTMLFormElement>) => {
         <div className="panel">
           <div className="panel-header">
             <div>
-              <h2>상품 목록</h2>
+              <h2>품명 목록</h2>
               <p className="subtitle">
-                현재 {data.products.length}개의 상품을 관리하고 있습니다.
+                현재 {data.products.length}개의 품명을 관리하고 있습니다.
               </p>
             </div>
             <input
@@ -1323,7 +1418,7 @@ const handleCustomerSubmit = async (event: FormEvent<HTMLFormElement>) => {
                 setProductListQuery(event.target.value);
                 setProductListPage(1);
               }}
-              placeholder="상품명 검색"
+              placeholder="품명 검색"
               style={{ maxWidth: "200px" }}
             />
             <button
@@ -1338,7 +1433,7 @@ const handleCustomerSubmit = async (event: FormEvent<HTMLFormElement>) => {
             <table>
               <thead>
                 <tr>
-                  <th>상품명</th>
+                  <th>품명</th>
                   <th>재고</th>
                   <th>미터당 단가</th>
                   <th>재고 가치</th>
@@ -1435,12 +1530,12 @@ const handleCustomerSubmit = async (event: FormEvent<HTMLFormElement>) => {
           </div>
           <form onSubmit={handleStockSubmit} className="form-grid">
             <label>
-              상품
+              품명
               <input
                 type="text"
                 value={stockProductQuery}
                 onChange={(event) => setStockProductQuery(event.target.value)}
-                placeholder="상품명 검색"
+                placeholder="품명 검색"
               />
               <select
                 value={stockForm.product_id}
@@ -1451,7 +1546,7 @@ const handleCustomerSubmit = async (event: FormEvent<HTMLFormElement>) => {
                   }))
                 }
               >
-                <option value="">상품 선택</option>
+                <option value="">품명 선택</option>
                 {productListForStock.map((product) => (
                   <option key={product.id} value={product.id}>
                     {product.name}
@@ -1546,7 +1641,7 @@ const handleCustomerSubmit = async (event: FormEvent<HTMLFormElement>) => {
                 <tr>
                   <th>일시</th>
                   <th>구분</th>
-                  <th>상품</th>
+                  <th>품명</th>
                   <th>미터</th>
                   <th>단가</th>
                   <th>총액</th>
@@ -1773,7 +1868,27 @@ const handleCustomerSubmit = async (event: FormEvent<HTMLFormElement>) => {
     if (!data) {
       return null;
     }
-    const recentSales = data.sales.slice(0, 20);
+    const historyPageSize = 10;
+    const term = saleHistoryQuery.trim().toLowerCase();
+    const filteredHistory = term
+      ? data.sales.filter((s) => {
+          const name = (s.customer_name ?? "일반 손님").toLowerCase();
+          const phoneDigits = (s.customer_phone ?? "").replace(/\D/g, "");
+          const termDigits = term.replace(/\D/g, "");
+          const termName = term.replace(/\(.+?\)/g, "").trim();
+          const nameMatches = termName ? name.includes(termName) : false;
+          const phoneMatches = termDigits.length >= 2 ? phoneDigits.includes(termDigits) : false;
+          const hasParenDigits = /\(\s*\d{2,}\s*\)/.test(term);
+          return hasParenDigits ? (nameMatches && phoneMatches) : (nameMatches || phoneMatches);
+        })
+      : data.sales;
+    const totalHistoryPages = Math.max(
+      1,
+      Math.ceil(filteredHistory.length / historyPageSize),
+    );
+    const currentHistoryPage = Math.min(saleHistoryPage, totalHistoryPages);
+    const start = (currentHistoryPage - 1) * historyPageSize;
+    const pagedSales = filteredHistory.slice(start, start + historyPageSize);
     return (
       <div className="tab-layout">
         <div className="panel">
@@ -1787,12 +1902,12 @@ const handleCustomerSubmit = async (event: FormEvent<HTMLFormElement>) => {
           </div>
           <form onSubmit={handleSaleSubmit} className="form-grid">
             <label>
-              상품
+              품명
               <input
                 type="text"
                 value={saleProductQuery}
                 onChange={(event) => setSaleProductQuery(event.target.value)}
-                placeholder="상품명/SKU 검색"
+                placeholder="품명 검색"
               />
               <select
                 value={saleForm.product_id}
@@ -1816,7 +1931,7 @@ const handleCustomerSubmit = async (event: FormEvent<HTMLFormElement>) => {
                   }))
                 }
               >
-                <option value="">상품 선택</option>
+                <option value="">품명 선택</option>
                 {productListForSale.map((product) => (
                   <option key={product.id} value={product.id}>
                     {product.name}
@@ -1974,7 +2089,7 @@ const handleCustomerSubmit = async (event: FormEvent<HTMLFormElement>) => {
                 )}
               </label>
               <label>
-                상품
+                품명
                 <select
                   value={returnForm.product_id}
                   disabled={!isReturnCustomerSelected(returnForm.customer_id)}
@@ -2019,7 +2134,7 @@ const handleCustomerSubmit = async (event: FormEvent<HTMLFormElement>) => {
                     });
                   }}
                 >
-                  <option value="">상품 선택</option>
+                  <option value="">품명 선택</option>
                   {productOptions.map((option) => (
                     <option key={option.productId} value={option.productId}>
                       {`${option.productName} (남은 ${formatNumber(option.outstanding)}m)`}
@@ -2122,7 +2237,40 @@ const handleCustomerSubmit = async (event: FormEvent<HTMLFormElement>) => {
         <div className="panel">
           <div className="panel-header">
             <h2>최근 판매 내역</h2>
-            <p className="subtitle">최신 {recentSales.length}건 표시</p>
+            <div className="subtitle" style={{ display: "flex", gap: 12, alignItems: "center" }}>
+              <span>
+                페이지 {currentHistoryPage} / {totalHistoryPages}
+              </span>
+              <input
+                type="text"
+                value={saleHistoryQuery}
+                onChange={(e) => {
+                  setSaleHistoryQuery(e.target.value);
+                  setSaleHistoryPage(1);
+                }}
+                placeholder="이름/연락처 검색"
+                list="sale-history-customer-suggestions"
+                style={{ maxWidth: 220 }}
+              />
+              <datalist id="sale-history-customer-suggestions">
+                {data.customers
+                  .filter((c) => {
+                    const q = saleHistoryQuery.trim().toLowerCase();
+                    if (!q) return false;
+                    return (
+                      c.name.toLowerCase().includes(q) ||
+                      ((c.phone ?? "").toLowerCase().includes(q))
+                    );
+                  })
+                  .slice(0, 10)
+                  .map((c) => (
+                    <option
+                      key={c.id}
+                      value={formatNameWithPhone(c.name, c.phone)}
+                    />
+                  ))}
+              </datalist>
+            </div>
           </div>
           <div className="table-wrapper">
             <table>
@@ -2130,7 +2278,7 @@ const handleCustomerSubmit = async (event: FormEvent<HTMLFormElement>) => {
                 <tr>
                   <th>일시</th>
                   <th>구분</th>
-                  <th>상품</th>
+                  <th>품명</th>
                   <th>고객</th>
                   <th>미터</th>
                   <th>금액</th>
@@ -2139,7 +2287,7 @@ const handleCustomerSubmit = async (event: FormEvent<HTMLFormElement>) => {
                 </tr>
               </thead>
               <tbody>
-                {recentSales.map((sale) => (
+                {pagedSales.map((sale) => (
                   <tr
                     key={sale.id}
                     className={
@@ -2185,6 +2333,26 @@ const handleCustomerSubmit = async (event: FormEvent<HTMLFormElement>) => {
               </tbody>
             </table>
           </div>
+          <div className="form-actions">
+            <button
+              type="button"
+              className="secondary"
+              onClick={() => setSaleHistoryPage((p) => Math.max(1, p - 1))}
+              disabled={currentHistoryPage <= 1}
+            >
+              이전
+            </button>
+            <button
+              type="button"
+              className="secondary"
+              onClick={() =>
+                setSaleHistoryPage((p) => Math.min(totalHistoryPages, p + 1))
+              }
+              disabled={currentHistoryPage >= totalHistoryPages}
+            >
+              다음
+            </button>
+          </div>
         </div>
       </div>
     );
@@ -2196,12 +2364,18 @@ const handleCustomerSubmit = async (event: FormEvent<HTMLFormElement>) => {
     if (!data) {
       return null;
     }
+    const detailsPageSize = 10;
+    const totalDetails = ledgerDetails.length;
+    const totalDetailsPages = Math.max(1, Math.ceil(totalDetails / detailsPageSize));
+    const currentDetailsPage = Math.min(ledgerDetailsPage, totalDetailsPages);
+    const detailsStart = (currentDetailsPage - 1) * detailsPageSize;
+    const pagedLedgerDetails = ledgerDetails.slice(detailsStart, detailsStart + detailsPageSize);
     return (
       <div className="tab-layout">
         <div className="panel">
           <div className="panel-header">
             <h2>장부 검색</h2>
-            <p className="subtitle">날짜, 고객, 상품으로 필터링하세요.</p>
+            <p className="subtitle">날짜, 고객, 품명으로 필터링하세요.</p>
           </div>
           <div className="form-grid">
             <label>
@@ -2264,7 +2438,7 @@ const handleCustomerSubmit = async (event: FormEvent<HTMLFormElement>) => {
               </datalist>
             </label>
             <label>
-              상품 검색
+              품명 검색
               <input
                 type="text"
                 value={ledgerFilter.product}
@@ -2274,7 +2448,7 @@ const handleCustomerSubmit = async (event: FormEvent<HTMLFormElement>) => {
                     product: event.target.value,
                   }))
                 }
-                placeholder="상품명 검색"
+                placeholder="품명 검색"
                 list="ledger-product-suggestions"
               />
               <datalist id="ledger-product-suggestions">
@@ -2407,52 +2581,97 @@ const handleCustomerSubmit = async (event: FormEvent<HTMLFormElement>) => {
                 </tr>
               </thead>
               <tbody>
-                {filteredSales.map((sale) => (
-                  <tr
-                    key={sale.id}
-                    className={
-                      sale.is_return
-                        ? "return-row"
-                        : sale.is_credit
-                        ? "credit-row"
-                        : undefined
-                    }
-                  >
-                    <td>{formatDateTime(sale.ts)}</td>
-                    <td>
-                      {sale.is_return ? (
-                        <span className="badge badge-return">반품</span>
-                      ) : (
-                        <span className="badge">판매</span>
-                      )}
-                    </td>
-                    <td>
-                      {sale.customer_name && sale.customer_name.trim()
-                        ? formatNameWithPhone(sale.customer_name, sale.customer_phone)
-                        : "일반 손님"}
-                    </td>
-                    <td>{sale.product_name}</td>
-                    <td>{formatNumber(sale.is_return ? -sale.qty : sale.qty)}</td>
-                    <td>{formatCurrency(sale.unit_price)}</td>
-                    <td>{formatCurrency(sale.is_return ? -sale.total_amount : sale.total_amount)}</td>
-                    <td>
-                      {sale.is_return ? (
-                        sale.is_credit ? (
-                          <span className="badge badge-credit">외상 정산</span>
-                        ) : (
-                          <span className="badge">반품 완료</span>
-                        )
-                      ) : sale.is_credit ? (
-                        <span className="badge badge-credit">외상</span>
-                      ) : (
-                        <span className="badge">완납</span>
-                      )}
-                    </td>
-                    <td>{sale.note ?? "-"}</td>
-                  </tr>
-                ))}
+                {pagedLedgerDetails.map((d) => {
+                  if (d.kind === "sale") {
+                    const sale = d.sale;
+                    return (
+                      <tr
+                        key={`sale-${sale.id}`}
+                        className={
+                          sale.is_return
+                            ? "return-row"
+                            : sale.is_credit
+                            ? "credit-row"
+                            : undefined
+                        }
+                      >
+                        <td>{formatDateTime(sale.ts)}</td>
+                        <td>
+                          {sale.is_return ? (
+                            <span className="badge badge-return">반품</span>
+                          ) : (
+                            <span className="badge">판매</span>
+                          )}
+                        </td>
+                        <td>
+                          {sale.customer_name && sale.customer_name.trim()
+                            ? formatNameWithPhone(sale.customer_name, sale.customer_phone)
+                            : "일반 손님"}
+                        </td>
+                        <td>{sale.product_name}</td>
+                        <td>{formatNumber(sale.is_return ? -sale.qty : sale.qty)}</td>
+                        <td>{formatCurrency(sale.unit_price)}</td>
+                        <td>{formatCurrency(sale.is_return ? -sale.total_amount : sale.total_amount)}</td>
+                        <td>
+                          {sale.is_return ? (
+                            sale.is_credit ? (
+                              <span className="badge badge-credit">외상 정산</span>
+                            ) : (
+                              <span className="badge">반품 완료</span>
+                            )
+                          ) : sale.is_credit ? (
+                            <span className="badge badge-credit">외상</span>
+                          ) : (
+                            <span className="badge">완납</span>
+                          )}
+                        </td>
+                        <td>{sale.note ?? "-"}</td>
+                      </tr>
+                    );
+                  } else {
+                    const p = d.payment;
+                    return (
+                      <tr key={`payment-${p.id}`}>
+                        <td>{formatDateTime(p.ts)}</td>
+                        <td>
+                          <span className="badge">외상 결제</span>
+                        </td>
+                        <td>{formatNameWithPhone(p.customer_name, p.customer_phone)}</td>
+                        <td>-</td>
+                        <td>-</td>
+                        <td>-</td>
+                        <td>{formatCurrency(p.amount)}</td>
+                        <td>외상 결제</td>
+                        <td>{p.note ?? "-"}</td>
+                      </tr>
+                    );
+                  }
+                })}
               </tbody>
             </table>
+          </div>
+          <div className="form-actions">
+            <button
+              type="button"
+              className="secondary"
+              onClick={() => setLedgerDetailsPage((p) => Math.max(1, p - 1))}
+              disabled={currentDetailsPage <= 1}
+            >
+              이전
+            </button>
+            <span style={{ margin: "0 8px" }}>
+              페이지 {currentDetailsPage} / {totalDetailsPages}
+            </span>
+            <button
+              type="button"
+              className="secondary"
+              onClick={() =>
+                setLedgerDetailsPage((p) => Math.min(totalDetailsPages, p + 1))
+              }
+              disabled={currentDetailsPage >= totalDetailsPages}
+            >
+              다음
+            </button>
           </div>
         </div>
       </div>
@@ -2463,6 +2682,12 @@ const handleCustomerSubmit = async (event: FormEvent<HTMLFormElement>) => {
     if (!data) {
       return null;
     }
+    const historyPageSize = 10;
+    const totalHistories = data.credits.length;
+    const totalHistoryPages = Math.max(1, Math.ceil(totalHistories / historyPageSize));
+    const currentHistoryPage = Math.min(creditHistoryPage, totalHistoryPages);
+    const historyStart = (currentHistoryPage - 1) * historyPageSize;
+    const pagedCredits = data.credits.slice(historyStart, historyStart + historyPageSize);
     return (
       <div className="tab-layout">
         <div className="panel">
@@ -2615,7 +2840,7 @@ const handleCustomerSubmit = async (event: FormEvent<HTMLFormElement>) => {
                 </tr>
               </thead>
               <tbody>
-                {data.credits.slice(0, 50).map((entry) => (
+                {pagedCredits.map((entry) => (
                   <tr key={entry.id}>
                     <td>{formatDateTime(entry.ts)}</td>
                     <td>
@@ -2626,7 +2851,7 @@ const handleCustomerSubmit = async (event: FormEvent<HTMLFormElement>) => {
                     </td>
                     <td>
                       {entry.is_payment ? (
-                        <span className="badge">결제</span>
+                        <span className="badge">외상 결제</span>
                       ) : (
                         <span className="badge badge-credit">외상</span>
                       )}
@@ -2638,6 +2863,29 @@ const handleCustomerSubmit = async (event: FormEvent<HTMLFormElement>) => {
                 ))}
               </tbody>
             </table>
+          </div>
+          <div className="form-actions">
+            <button
+              type="button"
+              className="secondary"
+              onClick={() => setCreditHistoryPage((p) => Math.max(1, p - 1))}
+              disabled={currentHistoryPage <= 1}
+            >
+              이전
+            </button>
+            <span style={{ margin: "0 8px" }}>
+              페이지 {currentHistoryPage} / {totalHistoryPages}
+            </span>
+            <button
+              type="button"
+              className="secondary"
+              onClick={() =>
+                setCreditHistoryPage((p) => Math.min(totalHistoryPages, p + 1))
+              }
+              disabled={currentHistoryPage >= totalHistoryPages}
+            >
+              다음
+            </button>
           </div>
         </div>
       </div>
@@ -2658,7 +2906,7 @@ const handleCustomerSubmit = async (event: FormEvent<HTMLFormElement>) => {
               <strong>{formatCurrency(totalInventoryValue)}</strong>
             </div>
             <div className="summary-card">
-              <span className="summary-label">상품 수</span>
+              <span className="summary-label">품명 수</span>
               <strong>{formatNumber(data.products.length)}</strong>
             </div>
             <div className="summary-card">
@@ -2744,7 +2992,7 @@ const handleCustomerSubmit = async (event: FormEvent<HTMLFormElement>) => {
               ))}
             </ul>
           ) : (
-            <p>모든 상품의 재고가 기준 이상입니다.</p>
+            <p>모든 품명의 재고가 기준 이상입니다.</p>
           )}
         </div>
       </div>
@@ -2774,7 +3022,7 @@ const handleCustomerSubmit = async (event: FormEvent<HTMLFormElement>) => {
 
       <nav className="tab-bar">
         {[
-          { key: "products", label: "상품" },
+          { key: "products", label: "품명" },
           { key: "customers", label: "고객" },
           { key: "sales", label: "판매" },
           { key: "ledger", label: "장부" },
@@ -2832,11 +3080,11 @@ const handleCustomerSubmit = async (event: FormEvent<HTMLFormElement>) => {
             style={{ maxWidth: 480, width: "90%", boxShadow: "0 8px 24px rgba(0,0,0,0.2)" }}
           >
             <div className="panel-header">
-              <h2>상품 삭제 확인</h2>
+              <h2>품명 삭제 확인</h2>
             </div>
             <div style={{ padding: "12px 16px" }}>
               <p>
-                <strong>{pendingDeleteProduct.name}</strong> 상품을 삭제하시겠습니까?
+                <strong>{pendingDeleteProduct.name}</strong> 품명을 삭제하시겠습니까?
               </p>
               <p className="subtitle">
                 삭제 후에도 기존 판매/입고/반품 기록은 그대로 남습니다.

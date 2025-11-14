@@ -336,7 +336,7 @@ struct ProductForm {
 #[tauri::command]
 fn create_product(state: State<DbState>, payload: ProductForm) -> CommandResult<AppData> {
     if payload.name.trim().is_empty() {
-        return Err(AppError::Validation("상품 이름을 입력해주세요.".into()).into());
+        return Err(AppError::Validation("품명을 입력해주세요.".into()).into());
     }
     if payload.unit_price < 0.0 {
         return Err(AppError::Validation("단가는 0 이상이어야 합니다.".into()).into());
@@ -403,7 +403,7 @@ struct ProductUpdateForm {
 #[tauri::command]
 fn update_product(state: State<DbState>, payload: ProductUpdateForm) -> CommandResult<AppData> {
     if payload.name.trim().is_empty() {
-        return Err(AppError::Validation("상품 이름을 입력해주세요.".into()).into());
+        return Err(AppError::Validation("품명을 입력해주세요.".into()).into());
     }
     if payload.unit_price < 0.0 {
         return Err(AppError::Validation("단가는 0 이상이어야 합니다.".into()).into());
@@ -548,7 +548,7 @@ fn record_stock_entry(state: State<DbState>, payload: StockEntryPayload) -> Comm
         .map_err(map_sql_err)?;
 
     let (current_qty, default_price) = product
-        .ok_or_else(|| AppError::Validation("존재하지 않는 상품입니다.".into()).to_string())?;
+        .ok_or_else(|| AppError::Validation("존재하지 않는 품명입니다.".into()).to_string())?;
 
     let qty_delta = match kind {
         TransactionKind::In => payload.qty,
@@ -633,7 +633,7 @@ fn record_sale(state: State<DbState>, payload: SalePayload) -> CommandResult<App
         .optional()
         .map_err(map_sql_err)?;
     let (current_qty, default_price) = product
-        .ok_or_else(|| AppError::Validation("존재하지 않는 상품입니다.".into()).to_string())?;
+        .ok_or_else(|| AppError::Validation("존재하지 않는 품명입니다.".into()).to_string())?;
 
     if current_qty < payload.qty {
         return Err(AppError::Validation("재고가 부족합니다.".into()).into());
