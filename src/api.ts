@@ -14,6 +14,7 @@ import type {
   ReturnPayload,
   StockEntryPayload,
   StockMovement,
+  SaleUpdatePayload,
 } from "./types";
 
 // Detect if running inside Tauri. In pure web, fallback to localStorage mock.
@@ -542,6 +543,97 @@ async function local_record_credit_payment(payload: CreditPaymentPayload): Promi
   return materialize(state);
 }
 
+async function local_update_sale(payload: SaleUpdatePayload): Promise<AppData> {
+  const state = loadState();
+  const sale = state.sales.find((s) => s.id === payload.id);
+  if (!sale) return materialize(state);
+  if (sale.is_return) {
+    throw new Error("반품 내역은 수정할 수 없습니다.");
+  }
+  const hasReturn = state.sales.some((s) => s.is_return && s.origin_sale_id === sale.id);
+  if (hasReturn) {
+    throw new Error("반품이 등록된 판매는 수정할 수 없습니다.");
+  }
+  const product = state.products.find((p) => p.id === sale.product_id);
+  if (!product) return materialize(state);
+  const qtyDelta = payload.qty - sale.qty;
+  if (qtyDelta > 0 && product.qty < qtyDelta) {
+    throw new Error("재고가 부족합니다.");
+  }
+  product.qty = product.qty - qtyDelta;
+  sale.qty = payload.qty;
+  sale.unit_price = payload.unit_price;
+  sale.total_amount = payload.unit_price * payload.qty;
+  sale.customer_id = payload.customer_id ?? null;
+  sale.customer_name =
+    payload.customer_id != null
+      ? state.customers.find((c) => c.id === payload.customer_id)?.name ?? null
+      : null;
+  sale.customer_phone =
+    payload.customer_id != null
+      ? state.customers.find((c) => c.id === payload.customer_id)?.phone ?? null
+      : null;
+  sale.note = payload.note ?? null;
+  sale.is_credit = !!payload.is_credit;
+  const mv = state.stock_movements.find((m) => m.sale_id === sale.id && m.kind === "OUT");
+  if (mv) {
+    mv.qty = sale.qty;
+    mv.unit_price = sale.unit_price;
+    mv.total_amount = sale.total_amount;
+    mv.customer_id = sale.customer_id;
+    mv.customer_name = sale.customer_name;
+    mv.note = sale.note;
+  }
+  const credit = state.credits.find((cr) => cr.sale_id === sale.id && !cr.is_payment);
+  if (sale.is_credit) {
+    if (credit) {
+      credit.amount = sale.total_amount;
+      credit.customer_id = sale.customer_id ?? credit.customer_id;
+      credit.customer_name = sale.customer_name ?? credit.customer_name;
+      credit.customer_phone = sale.customer_phone ?? credit.customer_phone;
+    } else if (sale.customer_id != null) {
+      const id = bumpId("credit");
+      state.credits.unshift({
+        id,
+        ts: nowIso(),
+        customer_id: sale.customer_id!,
+        customer_name: sale.customer_name ?? "",
+        customer_phone: sale.customer_phone ?? null,
+        sale_id: sale.id,
+        amount: sale.total_amount,
+        is_payment: false,
+        note: sale.note ?? null,
+      });
+    }
+  } else {
+    state.credits = state.credits.filter((cr) => !(cr.sale_id === sale.id && !cr.is_payment));
+  }
+  saveState(state);
+  return materialize(state);
+}
+
+async function local_delete_sale(saleId: number): Promise<AppData> {
+  const state = loadState();
+  const sale = state.sales.find((s) => s.id === saleId);
+  if (!sale) return materialize(state);
+  if (sale.is_return) {
+    throw new Error("반품 내역은 삭제할 수 없습니다.");
+  }
+  const hasReturn = state.sales.some((s) => s.is_return && s.origin_sale_id === sale.id);
+  if (hasReturn) {
+    throw new Error("반품이 등록된 판매는 삭제할 수 없습니다.");
+  }
+  const product = state.products.find((p) => p.id === sale.product_id);
+  if (product) {
+    product.qty = product.qty + sale.qty;
+  }
+  state.stock_movements = state.stock_movements.filter((m) => m.sale_id !== sale.id);
+  state.credits = state.credits.filter((cr) => !(cr.sale_id === sale.id && !cr.is_payment));
+  state.sales = state.sales.filter((s) => s.id !== sale.id);
+  saveState(state);
+  return materialize(state);
+}
+
 async function call<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
   if (isTauri()) {
     return invoke<T>(cmd, args);
@@ -570,6 +662,10 @@ async function call<T>(cmd: string, args?: Record<string, unknown>): Promise<T> 
       return (await local_record_return((args as any)?.payload)) as unknown as T;
     case "record_credit_payment":
       return (await local_record_credit_payment((args as any)?.payload)) as unknown as T;
+    case "update_sale":
+      return (await local_update_sale((args as any)?.payload)) as unknown as T;
+    case "delete_sale":
+      return (await local_delete_sale((args as any)?.saleId)) as unknown as T;
     default:
       throw new Error(`Unsupported command in web demo: ${cmd}`);
   }
@@ -629,4 +725,12 @@ export async function recordCreditPayment(
   payload: CreditPaymentPayload,
 ): Promise<AppData> {
   return call<AppData>("record_credit_payment", { payload });
+}
+
+export async function updateSale(payload: SaleUpdatePayload): Promise<AppData> {
+  return call<AppData>("update_sale", { payload });
+}
+
+export async function deleteSale(saleId: number): Promise<AppData> {
+  return call<AppData>("delete_sale", { saleId });
 }

@@ -133,6 +133,15 @@ export interface SalePayload {
   is_credit: boolean;
 }
 
+export interface SaleUpdatePayload {
+  id: number;
+  qty: number;
+  unit_price: number;
+  customer_id?: number | null;
+  note?: string | null;
+  is_credit: boolean;
+}
+
 export interface CreditPaymentPayload {
   customer_id: number;
   amount: number;

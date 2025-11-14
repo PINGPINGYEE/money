@@ -13,6 +13,8 @@ import {
   recordStockEntry,
   updateCustomer,
   updateProduct,
+  updateSale,
+  deleteSale,
 } from "./api";
 import type {
   AppData,
@@ -248,6 +250,15 @@ function App() {
   const [creditHistoryPage, setCreditHistoryPage] = useState(1);
   const [saleHistoryPage, setSaleHistoryPage] = useState(1);
   const [saleHistoryQuery, setSaleHistoryQuery] = useState("");
+  const [pendingDeleteSale, setPendingDeleteSale] = useState<SaleRecord | null>(null);
+  const [saleEdit, setSaleEdit] = useState<null | {
+    id: number;
+    qty: string;
+    amount: string;
+    customer_id: string;
+    is_credit: boolean;
+    note: string;
+  }>(null);
   const [ledgerFilter, setLedgerFilter] =
     useState<LedgerFilterState>(createEmptyLedgerFilter);
 
@@ -2284,6 +2295,7 @@ const handleCustomerSubmit = async (event: FormEvent<HTMLFormElement>) => {
                   <th>금액</th>
                   <th>상태</th>
                   <th>비고</th>
+                  <th>작업</th>
                 </tr>
               </thead>
               <tbody>
@@ -2328,6 +2340,37 @@ const handleCustomerSubmit = async (event: FormEvent<HTMLFormElement>) => {
                       )}
                     </td>
                     <td>{sale.note ?? "-"}</td>
+                    <td className="actions">
+                      {!sale.is_return && (
+                        <>
+                          <button
+                            type="button"
+                            className="ghost"
+                            onClick={() =>
+                              setSaleEdit({
+                                id: sale.id,
+                                qty: sale.qty.toString(),
+                                amount: sale.total_amount.toString(),
+                                customer_id: sale.customer_id ? String(sale.customer_id) : "",
+                                is_credit: sale.is_credit,
+                                note: sale.note ?? "",
+                              })
+                            }
+                            disabled={loading}
+                          >
+                            수정
+                          </button>
+                          <button
+                            type="button"
+                            className="danger"
+                            onClick={() => setPendingDeleteSale(sale)}
+                            disabled={loading}
+                          >
+                            삭제
+                          </button>
+                        </>
+                      )}
+                    </td>
                   </tr>
                 ))}
               </tbody>
@@ -3108,6 +3151,187 @@ const handleCustomerSubmit = async (event: FormEvent<HTMLFormElement>) => {
                 취소
               </button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {pendingDeleteSale && (
+        <div
+          style={{
+            position: "fixed",
+            inset: 0,
+            background: "rgba(0,0,0,0.4)",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            zIndex: 9999,
+          }}
+          role="dialog"
+          aria-modal="true"
+        >
+          <div className="panel" style={{ maxWidth: 480, width: "90%", boxShadow: "0 8px 24px rgba(0,0,0,0.2)" }}>
+            <div className="panel-header">
+              <h2>판매 내역 삭제</h2>
+            </div>
+            <div style={{ padding: "12px 16px" }}>
+              <p>
+                해당 판매를 삭제하시겠습니까? 재고와 외상 내역이 함께 조정됩니다.
+              </p>
+              <p className="subtitle">
+                반품이 연결된 판매는 삭제할 수 없습니다.
+              </p>
+            </div>
+            <div className="form-actions" style={{ padding: "0 16px 16px" }}>
+              <button
+                type="button"
+                className="danger"
+                onClick={async () => {
+                  try {
+                    if (!pendingDeleteSale) return;
+                    await runAction(() => deleteSale(pendingDeleteSale.id));
+                    setPendingDeleteSale(null);
+                  } catch {
+                    // handled by runAction error banner
+                  }
+                }}
+                disabled={loading}
+              >
+                삭제
+              </button>
+              <button
+                type="button"
+                className="secondary"
+                onClick={() => setPendingDeleteSale(null)}
+                disabled={loading}
+              >
+                취소
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {saleEdit && (
+        <div
+          style={{
+            position: "fixed",
+            inset: 0,
+            background: "rgba(0,0,0,0.4)",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            zIndex: 9999,
+          }}
+          role="dialog"
+          aria-modal="true"
+        >
+          <div className="panel" style={{ maxWidth: 560, width: "95%", boxShadow: "0 8px 24px rgba(0,0,0,0.2)" }}>
+            <div className="panel-header">
+              <h2>판매 내역 수정</h2>
+            </div>
+            <form
+              className="form-grid"
+              onSubmit={async (e) => {
+                e.preventDefault();
+                if (!saleEdit) return;
+                const qty = parseNumber(saleEdit.qty);
+                if (qty <= 0) {
+                  setError("미터은 0보다 커야 합니다.");
+                  return;
+                }
+                const amount = parseNumber(saleEdit.amount);
+                const unit = qty > 0 ? amount / qty : 0;
+                try {
+                  await runAction(() =>
+                    updateSale({
+                      id: saleEdit.id,
+                      qty,
+                      unit_price: unit,
+                      customer_id: saleEdit.customer_id ? Number(saleEdit.customer_id) : null,
+                      note: sanitizeNullable(saleEdit.note),
+                      is_credit: saleEdit.is_credit,
+                    }),
+                  );
+                  setSaleEdit(null);
+                } catch {
+                  // error shown via banner
+                }
+              }}
+            >
+              <label>
+                미터
+                <input
+                  type="number"
+                  min="0"
+                  step="0.01"
+                  value={saleEdit.qty}
+                  onChange={(e) =>
+                    setSaleEdit((prev) => (prev ? { ...prev, qty: e.target.value } : prev))
+                  }
+                />
+              </label>
+              <label>
+                금액 (원)
+                <input
+                  type="number"
+                  min="0"
+                  step="0.01"
+                  value={saleEdit.amount}
+                  onChange={(e) =>
+                    setSaleEdit((prev) => (prev ? { ...prev, amount: e.target.value } : prev))
+                  }
+                />
+              </label>
+              <label>
+                고객
+                <select
+                  value={saleEdit.customer_id}
+                  onChange={(e) =>
+                    setSaleEdit((prev) => (prev ? { ...prev, customer_id: e.target.value } : prev))
+                  }
+                >
+                  <option value="">일반 손님</option>
+                  {(data?.customers ?? []).map((c) => (
+                    <option key={c.id} value={c.id}>
+                      {formatNameWithPhone(c.name, c.phone)}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="checkbox">
+                <input
+                  type="checkbox"
+                  checked={saleEdit.is_credit}
+                  onChange={(e) =>
+                    setSaleEdit((prev) => (prev ? { ...prev, is_credit: e.target.checked } : prev))
+                  }
+                />
+                외상 거래로 기록
+              </label>
+              <label className="span-2">
+                비고
+                <textarea
+                  value={saleEdit.note}
+                  onChange={(e) =>
+                    setSaleEdit((prev) => (prev ? { ...prev, note: e.target.value } : prev))
+                  }
+                  placeholder="메모"
+                />
+              </label>
+              <div className="form-actions">
+                <button type="submit" disabled={loading}>
+                  수정 완료
+                </button>
+                <button
+                  type="button"
+                  className="secondary"
+                  onClick={() => setSaleEdit(null)}
+                  disabled={loading}
+                >
+                  취소
+                </button>
+              </div>
+            </form>
           </div>
         </div>
       )}
