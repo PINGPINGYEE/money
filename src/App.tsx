@@ -253,6 +253,9 @@ function App() {
   const [saleHistoryPage, setSaleHistoryPage] = useState(1);
   const [saleHistoryQuery, setSaleHistoryQuery] = useState("");
   const [pendingDeleteSale, setPendingDeleteSale] = useState<SaleRecord | null>(null);
+  const [customerListQuery, setCustomerListQuery] = useState("");
+  const [creditOverviewQuery, setCreditOverviewQuery] = useState("");
+  const [creditHistoryQuery, setCreditHistoryQuery] = useState("");
   const [saleEdit, setSaleEdit] = useState<null | {
     id: number;
     qty: string;
@@ -1737,6 +1740,14 @@ const handleCustomerSubmit = async (event: FormEvent<HTMLFormElement>) => {
     if (!data) {
       return null;
     }
+    const q = customerListQuery.trim().toLowerCase();
+    const filteredCustomers = q
+      ? data.customers.filter((c) => {
+          const nameHit = c.name.toLowerCase().includes(q);
+          const phoneHit = (c.phone ?? "").toLowerCase().includes(q);
+          return nameHit || phoneHit;
+        })
+      : data.customers;
     return (
       <div className="tab-layout">
         <div className="panel">
@@ -1747,6 +1758,13 @@ const handleCustomerSubmit = async (event: FormEvent<HTMLFormElement>) => {
                 {data.customers.length}명의 고객 정보를 관리 중입니다.
               </p>
             </div>
+            <input
+              type="text"
+              value={customerListQuery}
+              onChange={(e) => setCustomerListQuery(e.target.value)}
+              placeholder="이름/연락처 검색"
+              style={{ maxWidth: 220 }}
+            />
           </div>
           <div className="table-wrapper">
             <table>
@@ -1760,7 +1778,7 @@ const handleCustomerSubmit = async (event: FormEvent<HTMLFormElement>) => {
                 </tr>
               </thead>
               <tbody>
-                {data.customers.map((customer) => {
+                {filteredCustomers.map((customer) => {
                   const balance = outstandingByCustomer.get(customer.id);
                   return (
                    <tr
@@ -2761,11 +2779,41 @@ const handleCustomerSubmit = async (event: FormEvent<HTMLFormElement>) => {
       return null;
     }
     const historyPageSize = 10;
-    const totalHistories = data.credits.length;
+    // Filter: 고객별 미수 현황
+    const overviewTerm = creditOverviewQuery.trim().toLowerCase();
+    const filteredBalances = overviewTerm
+      ? data.customer_balances.filter((balance) => {
+          const name = (balance.customer_name ?? "").toLowerCase();
+          const phoneDigits = (balance.customer_phone ?? "").replace(/\D/g, "");
+          const termDigits = overviewTerm.replace(/\D/g, "");
+          const termName = overviewTerm.replace(/\(.+?\)/g, "").trim();
+          const nameMatches = termName ? name.includes(termName) : false;
+          const phoneMatches = termDigits.length >= 2 ? phoneDigits.includes(termDigits) : false;
+          const hasParenDigits = /\(\s*\d{2,}\s*\)/.test(overviewTerm);
+          return hasParenDigits ? nameMatches && phoneMatches : nameMatches || phoneMatches;
+        })
+      : data.customer_balances;
+
+    // Filter: 외상/결제 히스토리
+    const historyTerm = creditHistoryQuery.trim().toLowerCase();
+    const filteredCredits = historyTerm
+      ? data.credits.filter((entry) => {
+          const name = (entry.customer_name ?? "").toLowerCase();
+          const phoneDigits = (entry.customer_phone ?? "").replace(/\D/g, "");
+          const termDigits = historyTerm.replace(/\D/g, "");
+          const termName = historyTerm.replace(/\(.+?\)/g, "").trim();
+          const nameMatches = termName ? name.includes(termName) : false;
+          const phoneMatches = termDigits.length >= 2 ? phoneDigits.includes(termDigits) : false;
+          const hasParenDigits = /\(\s*\d{2,}\s*\)/.test(historyTerm);
+          return hasParenDigits ? nameMatches && phoneMatches : nameMatches || phoneMatches;
+        })
+      : data.credits;
+
+    const totalHistories = filteredCredits.length;
     const totalHistoryPages = Math.max(1, Math.ceil(totalHistories / historyPageSize));
     const currentHistoryPage = Math.min(creditHistoryPage, totalHistoryPages);
     const historyStart = (currentHistoryPage - 1) * historyPageSize;
-    const pagedCredits = data.credits.slice(historyStart, historyStart + historyPageSize);
+    const pagedCredits = filteredCredits.slice(historyStart, historyStart + historyPageSize);
     return (
       <div className="tab-layout">
         <div className="panel">
@@ -2850,15 +2898,43 @@ const handleCustomerSubmit = async (event: FormEvent<HTMLFormElement>) => {
         <div className="panel">
           <div className="panel-header">
             <h2>고객별 미수 현황</h2>
-            <p className="subtitle">
-              현재 미수 총액{" "}
-              {formatCurrency(
-                outstandingCustomers.reduce(
-                  (sum, balance) => sum + balance.outstanding,
-                  0,
-                ),
-              )}
-            </p>
+            <div className="subtitle" style={{ display: "flex", gap: 12, alignItems: "center" }}>
+              <span>
+                현재 미수 총액{" "}
+                {formatCurrency(
+                  data.customer_balances.reduce(
+                    (sum, balance) => sum + balance.outstanding,
+                    0,
+                  ),
+                )}
+              </span>
+              <input
+                type="text"
+                value={creditOverviewQuery}
+                onChange={(e) => setCreditOverviewQuery(e.target.value)}
+                placeholder="이름/연락처 검색"
+                list="credit-overview-customer-suggestions"
+                style={{ maxWidth: 220 }}
+              />
+              <datalist id="credit-overview-customer-suggestions">
+                {data.customers
+                  .filter((c) => {
+                    const q = creditOverviewQuery.trim().toLowerCase();
+                    if (!q) return false;
+                    return (
+                      c.name.toLowerCase().includes(q) ||
+                      ((c.phone ?? "").toLowerCase().includes(q))
+                    );
+                  })
+                  .slice(0, 10)
+                  .map((c) => (
+                    <option
+                      key={c.id}
+                      value={formatNameWithPhone(c.name, c.phone)}
+                    />
+                  ))}
+              </datalist>
+            </div>
           </div>
           <div className="table-wrapper">
             <table>
@@ -2872,7 +2948,7 @@ const handleCustomerSubmit = async (event: FormEvent<HTMLFormElement>) => {
                 </tr>
               </thead>
               <tbody>
-                {data.customer_balances.map((balance) => (
+                {filteredBalances.map((balance) => (
                   <tr
                     key={balance.customer_id}
                     className={
@@ -2905,6 +2981,40 @@ const handleCustomerSubmit = async (event: FormEvent<HTMLFormElement>) => {
 
         <div className="panel">
           <h2>외상/결제 히스토리</h2>
+          <div className="subtitle" style={{ display: "flex", gap: 12, alignItems: "center" }}>
+            <span>
+              페이지 {currentHistoryPage} / {totalHistoryPages}
+            </span>
+            <input
+              type="text"
+              value={creditHistoryQuery}
+              onChange={(e) => {
+                setCreditHistoryQuery(e.target.value);
+                setCreditHistoryPage(1);
+              }}
+              placeholder="이름/연락처 검색"
+              list="credit-history-customer-suggestions"
+              style={{ maxWidth: 220 }}
+            />
+            <datalist id="credit-history-customer-suggestions">
+              {data.customers
+                .filter((c) => {
+                  const q = creditHistoryQuery.trim().toLowerCase();
+                  if (!q) return false;
+                  return (
+                    c.name.toLowerCase().includes(q) ||
+                    ((c.phone ?? "").toLowerCase().includes(q))
+                  );
+                })
+                .slice(0, 10)
+                .map((c) => (
+                  <option
+                    key={c.id}
+                    value={formatNameWithPhone(c.name, c.phone)}
+                  />
+                ))}
+            </datalist>
+          </div>
           <div className="table-wrapper">
             <table>
               <thead>
@@ -3030,6 +3140,29 @@ const handleCustomerSubmit = async (event: FormEvent<HTMLFormElement>) => {
                 ))}
               </tbody>
             </table>
+          </div>
+          <div className="form-actions">
+            <button
+              type="button"
+              className="secondary"
+              onClick={() => setCreditHistoryPage((p) => Math.max(1, p - 1))}
+              disabled={currentHistoryPage <= 1}
+            >
+              이전
+            </button>
+            <span style={{ margin: "0 8px" }}>
+              페이지 {currentHistoryPage} / {totalHistoryPages}
+            </span>
+            <button
+              type="button"
+              className="secondary"
+              onClick={() =>
+                setCreditHistoryPage((p) => Math.min(totalHistoryPages, p + 1))
+              }
+              disabled={currentHistoryPage >= totalHistoryPages}
+            >
+              다음
+            </button>
           </div>
         </div>
 
