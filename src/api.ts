@@ -90,100 +90,14 @@ function loadState(): CanonicalState {
   const raw = localStorage.getItem(STORAGE_KEY);
   if (raw) return JSON.parse(raw) as CanonicalState;
 
-  // Seed minimal demo data
-  const p1Id = bumpId("product");
-  const p2Id = bumpId("product");
-  const c1Id = bumpId("customer");
-
+  // Start with a clean empty state (no demo seed)
   const seed: CanonicalState = {
-    products: [
-      {
-        id: p1Id,
-        name: "PET 투명 필름",
-        sku: "PET-CLR",
-        unit_price: 3500,
-        qty: 120,
-        note: null,
-        low_stock_threshold: 30,
-        created_at: nowIso(),
-      },
-      {
-        id: p2Id,
-        name: "블랙 매트 필름",
-        sku: "BLK-MAT",
-        unit_price: 4200,
-        qty: 80,
-        note: null,
-        low_stock_threshold: 20,
-        created_at: nowIso(),
-      },
-    ],
-    customers: [
-      {
-        id: c1Id,
-        name: "홍길동",
-        phone: "01012345678",
-        note: null,
-        created_at: nowIso(),
-      },
-    ],
+    products: [],
+    customers: [],
     sales: [],
     stock_movements: [],
     credits: [],
   };
-
-  // Seed one sale (credit)
-  const unitPrice = 4200;
-  const qty = 5;
-  const saleId = bumpId("sale");
-  seed.sales.push({
-    id: saleId,
-    ts: nowIso(),
-    product_id: p2Id,
-    product_name: "블랙 매트 필름",
-    qty,
-    unit_price: unitPrice,
-    total_amount: unitPrice * qty,
-    customer_id: c1Id,
-    customer_name: "홍길동",
-    customer_phone: "01012345678",
-    note: null,
-    is_credit: true,
-    is_return: false,
-    origin_sale_id: null,
-  });
-  const stockId = bumpId("stock");
-  seed.stock_movements.push({
-    id: stockId,
-    ts: nowIso(),
-    kind: "OUT",
-    product_id: p2Id,
-    product_name: "블랙 매트 필름",
-    qty,
-    unit_price: unitPrice,
-    total_amount: unitPrice * qty,
-    counterparty: null,
-    customer_id: c1Id,
-    customer_name: "홍길동",
-    note: "웹 데모 시드",
-    sale_id: saleId,
-  });
-  const creditId = bumpId("credit");
-  seed.credits.push({
-    id: creditId,
-    ts: nowIso(),
-    customer_id: c1Id,
-    customer_name: "홍길동",
-    customer_phone: "01012345678",
-    sale_id: saleId,
-    amount: unitPrice * qty,
-    is_payment: false,
-    note: "외상 발생 (웹 데모)",
-  });
-  // Decrease stock
-  const p2 = seed.products.find((p) => p.id === p2Id)!;
-  p2.qty -= qty;
-
   localStorage.setItem(STORAGE_KEY, JSON.stringify(seed));
   return seed;
 }
@@ -458,68 +372,104 @@ async function local_record_return(payload: ReturnPayload): Promise<AppData> {
   const product = state.products.find((p) => p.id === payload.product_id);
   if (!product) return materialize(state);
   const qty = payload.qty;
-  // Restock
   product.qty = product.qty + qty;
-  const unitPrice = payload.override_amount != null ? payload.override_amount / qty : product.unit_price;
-  const total = unitPrice * qty;
-  const saleId = bumpId("sale");
-  state.sales.unshift({
-    id: saleId,
-    ts: nowIso(),
-    product_id: product.id,
-    product_name: product.name,
-    qty,
-    unit_price: unitPrice,
-    total_amount: total,
-    customer_id: payload.customer_id ?? null,
-    customer_name:
-      payload.customer_id != null
-        ? state.customers.find((c) => c.id === payload.customer_id)?.name ?? null
-        : null,
-    customer_phone:
-      payload.customer_id != null
-        ? state.customers.find((c) => c.id === payload.customer_id)?.phone ?? null
-        : null,
-    note: payload.note ?? null,
-    is_credit: false,
-    is_return: true,
-    origin_sale_id: null,
-  });
-  const stockId = bumpId("stock");
-  state.stock_movements.unshift({
-    id: stockId,
-    ts: nowIso(),
-    kind: "RETURN",
-    product_id: product.id,
-    product_name: product.name,
-    qty,
-    unit_price: unitPrice,
-    total_amount: total,
-    counterparty: null,
-    customer_id: payload.customer_id ?? null,
-    customer_name:
-      payload.customer_id != null
-        ? state.customers.find((c) => c.id === payload.customer_id)?.name ?? null
-        : null,
-    note: payload.note ?? null,
-    sale_id: saleId,
-  });
-  // Treat return as payment if it is associated to a customer
-  if (payload.customer_id != null) {
-    const customer = state.customers.find((c) => c.id === payload.customer_id)!;
-    const creditId = bumpId("credit");
-    state.credits.unshift({
-      id: creditId,
-      ts: nowIso(),
-      customer_id: customer.id,
-      customer_name: customer.name,
-      customer_phone: customer.phone,
-      sale_id: saleId,
-      amount: total,
-      is_payment: true,
-      note: payload.note ?? "반품 정산",
+  const ts = nowIso();
+
+  const candidates = state.sales
+    .filter((s) => !s.is_return && s.product_id === payload.product_id)
+    .filter((s) => {
+      if (payload.customer_id == null) {
+        return s.customer_id == null;
+      }
+      return s.customer_id === payload.customer_id;
+    })
+    .sort((a, b) => (a.ts > b.ts ? 1 : -1));
+
+  let remaining = qty;
+  let computedTotal = 0;
+
+  for (const sale of candidates) {
+    if (remaining <= 0) break;
+    const returnedToThisSale = state.sales
+      .filter((r) => r.is_return && r.origin_sale_id === sale.id)
+      .reduce((sum, r) => sum + r.qty, 0);
+    const available = Math.max(sale.qty - returnedToThisSale, 0);
+    if (available <= 0) continue;
+    const portion = Math.min(available, remaining);
+    const unit = sale.unit_price;
+    const total = unit * portion;
+
+    const returnSaleId = bumpId("sale");
+    state.sales.unshift({
+      id: returnSaleId,
+      ts,
+      product_id: product.id,
+      product_name: product.name,
+      qty: portion,
+      unit_price: unit,
+      total_amount: total,
+      customer_id: sale.customer_id ?? null,
+      customer_name: sale.customer_name ?? null,
+      customer_phone: sale.customer_phone ?? null,
+      note: payload.note ?? null,
+      is_credit: sale.is_credit,
+      is_return: true,
+      origin_sale_id: sale.id,
     });
+    const stockId = bumpId("stock");
+    state.stock_movements.unshift({
+      id: stockId,
+      ts,
+      kind: "RETURN",
+      product_id: product.id,
+      product_name: product.name,
+      qty: portion,
+      unit_price: unit,
+      total_amount: total,
+      counterparty: null,
+      customer_id: sale.customer_id ?? null,
+      customer_name: sale.customer_name ?? null,
+      note: payload.note ?? null,
+      sale_id: returnSaleId,
+    });
+    if (sale.customer_id != null && sale.is_credit) {
+      const creditId = bumpId("credit");
+      state.credits.unshift({
+        id: creditId,
+        ts,
+        customer_id: sale.customer_id!,
+        customer_name: sale.customer_name ?? "",
+        customer_phone: sale.customer_phone ?? null,
+        sale_id: sale.id,
+        amount: total,
+        is_payment: true,
+        note: payload.note ?? "반품 정산",
+      });
+    }
+    computedTotal += total;
+    remaining -= portion;
   }
+
+  if (payload.override_amount != null && payload.customer_id != null) {
+    const diff = payload.override_amount - computedTotal;
+    if (Math.abs(diff) > 1e-9) {
+      const creditId = bumpId("credit");
+      state.credits.unshift({
+        id: creditId,
+        ts,
+        customer_id: payload.customer_id!,
+        customer_name:
+          state.customers.find((c) => c.id === payload.customer_id)?.name ?? "",
+        customer_phone:
+          state.customers.find((c) => c.id === payload.customer_id)?.phone ?? null,
+        sale_id: null,
+        amount: Math.abs(diff),
+        is_payment: diff < 0,
+        note: "반품 금액 조정",
+      });
+    }
+  }
+
   saveState(state);
   return materialize(state);
 }

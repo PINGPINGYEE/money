@@ -249,6 +249,7 @@ function App() {
   const [productListQuery, setProductListQuery] = useState("");
   const [pendingDeleteProduct, setPendingDeleteProduct] = useState<Product | null>(null);
   const [ledgerDetailsPage, setLedgerDetailsPage] = useState(1);
+  const [ledgerCombinedPage, setLedgerCombinedPage] = useState(1);
   const [creditHistoryPage, setCreditHistoryPage] = useState(1);
   const [saleHistoryPage, setSaleHistoryPage] = useState(1);
   const [saleHistoryQuery, setSaleHistoryQuery] = useState("");
@@ -1225,6 +1226,147 @@ const handleCustomerSubmit = async (event: FormEvent<HTMLFormElement>) => {
     ]);
   };
 
+  const handleExportLedgerCombined = () => {
+    if (!data) return;
+    const startTime = ledgerFilter.startDate
+      ? new Date(`${ledgerFilter.startDate}T00:00:00`).getTime()
+      : null;
+    const endTime = ledgerFilter.endDate
+      ? new Date(`${ledgerFilter.endDate}T23:59:59`).getTime()
+      : null;
+    const productTerm = ledgerFilter.product.trim().toLowerCase();
+    type Combined = {
+      ts: string;
+      type: string;
+      product: string;
+      customer: string;
+      phone: string;
+      qty: string;
+      unit: string;
+      salesTotal: string;
+      outflow: string;
+      inflow: string;
+      purchaseTotal: string;
+      balance: string;
+      saleId: string;
+      note: string;
+    };
+    const combined: Combined[] = [];
+    ledgerDetails.forEach((d) => {
+      if (d.kind === "sale") {
+        const s = d.sale;
+        combined.push({
+          ts: formatDateTime(s.ts),
+          type: s.is_return ? "반품" : "판매",
+          product: s.product_name,
+          customer: String(s.customer_name ?? "일반 손님"),
+          phone: String(s.customer_phone ?? ""),
+          qty: (s.is_return ? -s.qty : s.qty).toString(),
+          unit: s.unit_price.toString(),
+          salesTotal: (s.is_return ? -s.total_amount : s.total_amount).toString(),
+          outflow: "",
+          inflow: "",
+          purchaseTotal: "",
+          balance: "",
+          saleId: s.id != null ? String(s.id) : "",
+          note: String(s.note ?? ""),
+        });
+      } else {
+        const p = d.payment;
+        combined.push({
+          ts: formatDateTime(p.ts),
+          type: "외상 결제",
+          product: "",
+          customer: String(p.customer_name ?? ""),
+          phone: String(p.customer_phone ?? ""),
+          qty: "",
+          unit: "",
+          salesTotal: "",
+          outflow: "",
+          inflow: String(p.amount),
+          purchaseTotal: "",
+          balance: String(creditOutstandingById.get(p.id) ?? 0),
+          saleId: p.sale_id != null ? String(p.sale_id) : "",
+          note: String(p.note ?? ""),
+        });
+      }
+    });
+    (data.stock_movements ?? [])
+      .filter((m) => m.kind === "IN")
+      .filter((m) => {
+        // 고객 검색이 있는 경우, 해당 고객 데이터만 요청했으므로 고객이 없는 입고 행은 제외
+        const customerTerm = ledgerFilter.customer.trim().toLowerCase();
+        if (customerTerm) {
+          return false;
+        }
+        const t = new Date(m.ts).getTime();
+        if (Number.isFinite(t)) {
+          if (startTime && t < startTime) return false;
+          if (endTime && t > endTime) return false;
+        }
+        if (productTerm && !m.product_name.toLowerCase().includes(productTerm)) {
+          return false;
+        }
+        return true;
+      })
+      .forEach((m) => {
+        const amount =
+          m.total_amount != null
+            ? m.total_amount
+            : m.unit_price != null
+            ? m.unit_price * m.qty
+            : 0;
+        combined.push({
+          ts: formatDateTime(m.ts),
+          type: "입고",
+          product: m.product_name,
+          customer: "",
+          phone: "",
+          qty: String(m.qty),
+          unit: m.unit_price != null ? String(m.unit_price) : "",
+          salesTotal: "",
+          outflow: String(amount),
+          inflow: "",
+          purchaseTotal: String(amount),
+          balance: "",
+          saleId: m.sale_id != null ? String(m.sale_id) : "",
+          note: String(m.note ?? ""),
+        });
+      });
+    const header = [
+      "날짜",
+      "구분",
+      "품명",
+      "고객",
+      "연락처",
+      "미터",
+      "단가",
+      "매출합계",
+      "출금",
+      "입금",
+      "매입합계",
+      "잔액",
+      "관련 판매",
+      "비고",
+    ];
+    const rows = combined.map((r) => [
+      r.ts,
+      r.type,
+      r.product,
+      r.customer,
+      r.phone,
+      r.qty,
+      r.unit,
+      r.salesTotal,
+      r.outflow,
+      r.inflow,
+      r.purchaseTotal,
+      r.balance,
+      r.saleId,
+      r.note,
+    ]);
+    exportToCsv("ledger-combined.csv", [header, ...rows]);
+  };
   const handleExportInventory = () => {
     if (!data) {
       return;
@@ -2494,6 +2636,74 @@ const handleCustomerSubmit = async (event: FormEvent<HTMLFormElement>) => {
     const currentDetailsPage = Math.min(ledgerDetailsPage, totalDetailsPages);
     const detailsStart = (currentDetailsPage - 1) * detailsPageSize;
     const pagedLedgerDetails = ledgerDetails.slice(detailsStart, detailsStart + detailsPageSize);
+    // 통합 상세 내역 계산 (요청 컬럼 기준)
+    type CombinedRow = {
+      ts: string;
+      account: string; // 반품 | 출고 | 입금
+      name: string; // 고객명
+      product: string; // 거래 품명
+      qty: string; // 미터
+      unit: string; // 단가
+      amount: string; // 금액
+      outstanding: string; // 남은외상금액
+    };
+    const combinedAll: CombinedRow[] = [];
+    ledgerDetails.forEach((d) => {
+      if (d.kind === "sale") {
+        const s = d.sale;
+        const isReturn = s.is_return;
+        const account = isReturn ? "반품" : "출고";
+        const name = String(s.customer_name ?? "일반 손님");
+        const product = s.product_name;
+        const qty = (isReturn ? -s.qty : s.qty).toString();
+        const unit = s.unit_price.toString();
+        const amount = (isReturn ? -s.total_amount : s.total_amount).toString();
+        let outstanding = "";
+        // 외상 판매 시점의 남은외상금액 표시 (해당 판매가 외상인 경우)
+        if (!isReturn && s.is_credit) {
+          const creditForSale = data?.credits.find(
+            (cr) => cr.sale_id === s.id && !cr.is_payment,
+          );
+          if (creditForSale) {
+            outstanding = String(creditOutstandingById.get(creditForSale.id) ?? "");
+          }
+        }
+        // 반품 행 자체는 입금과 별도 라인으로 존재하므로 여기서는 남은외상금액 미표시
+        combinedAll.push({
+          ts: formatDateTime(s.ts),
+          account,
+          name,
+          product,
+          qty,
+          unit,
+          amount,
+          outstanding,
+        });
+      } else {
+        const p = d.payment;
+        let productName = "";
+        if (p.sale_id != null) {
+          const relatedSale = data?.sales.find((s) => s.id === p.sale_id);
+          productName = relatedSale?.product_name ?? "";
+        }
+        combinedAll.push({
+          ts: formatDateTime(p.ts),
+          account: "입금",
+          name: String(p.customer_name ?? ""),
+          product: productName,
+          qty: "",
+          unit: "",
+          amount: String(p.amount),
+          outstanding: String(creditOutstandingById.get(p.id) ?? ""),
+        });
+      }
+    });
+    const combinedPageSize = 10;
+    const totalCombined = combinedAll.length;
+    const totalCombinedPages = Math.max(1, Math.ceil(totalCombined / combinedPageSize));
+    const currentCombinedPage = Math.min(ledgerCombinedPage, totalCombinedPages);
+    const combinedStart = (currentCombinedPage - 1) * combinedPageSize;
+    const pagedCombined = combinedAll.slice(combinedStart, combinedStart + combinedPageSize);
     return (
       <div className="tab-layout">
         <div className="panel">
@@ -2612,6 +2822,9 @@ const handleCustomerSubmit = async (event: FormEvent<HTMLFormElement>) => {
               <button type="button" onClick={handleExportLedger}>
                 CSV 내보내기
               </button>
+              <button type="button" onClick={handleExportLedgerCombined}>
+                CSV 내보내기(통합)
+              </button>
             </div>
           </div>
         </div>
@@ -2684,6 +2897,63 @@ const handleCustomerSubmit = async (event: FormEvent<HTMLFormElement>) => {
                 })}
               </tbody>
             </table>
+          </div>
+        </div>
+
+        <div className="panel">
+          <h3>통합 상세 내역</h3>
+          <div className="table-wrapper">
+            <table>
+              <thead>
+                <tr>
+                  <th>날짜</th>
+                  <th>이름</th>
+                  <th>거래 품명</th>
+                  <th>계정</th>
+                  <th>수량</th>
+                  <th>단가</th>
+                  <th>금액</th>
+                  <th>남은외상금액</th>
+                </tr>
+              </thead>
+              <tbody>
+                {pagedCombined.map((r, idx) => (
+                  <tr key={`combined-${combinedStart + idx}`}>
+                    <td>{r.ts}</td>
+                    <td>{r.name || "-"}</td>
+                    <td>{r.product || "-"}</td>
+                    <td>{r.account}</td>
+                    <td>{r.qty ? formatNumber(Number(r.qty)) : "-"}</td>
+                    <td>{r.unit ? formatCurrency(Number(r.unit)) : "-"}</td>
+                    <td>{r.amount ? formatCurrency(Number(r.amount)) : "-"}</td>
+                    <td>{r.outstanding ? formatCurrency(Number(r.outstanding)) : "-"}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <div className="form-actions">
+            <button
+              type="button"
+              className="secondary"
+              onClick={() => setLedgerCombinedPage((p) => Math.max(1, p - 1))}
+              disabled={currentCombinedPage <= 1}
+            >
+              이전
+            </button>
+            <span style={{ margin: "0 8px" }}>
+              페이지 {currentCombinedPage} / {totalCombinedPages}
+            </span>
+            <button
+              type="button"
+              className="secondary"
+              onClick={() =>
+                setLedgerCombinedPage((p) => Math.min(totalCombinedPages, p + 1))
+              }
+              disabled={currentCombinedPage >= totalCombinedPages}
+            >
+              다음
+            </button>
           </div>
         </div>
 
@@ -2797,6 +3067,98 @@ const handleCustomerSubmit = async (event: FormEvent<HTMLFormElement>) => {
               다음
             </button>
           </div>
+        </div>
+
+        <div className="panel">
+          <h3>총합 내역</h3>
+          {(() => {
+            // 매출합계/입금 합계는 ledgerDetails 기반(현재 필터 반영)
+            const salesTotal = ledgerDetails.reduce((sum, d) => {
+              if (d.kind === "sale") {
+                const sign = d.sale.is_return ? -1 : 1;
+                return sum + sign * d.sale.total_amount;
+              }
+              return sum;
+            }, 0);
+            const paymentsTotal = ledgerDetails.reduce((sum, d) => {
+              if (d.kind === "payment") {
+                return sum + d.payment.amount;
+              }
+              return sum;
+            }, 0);
+            // 매입합계(입고 금액) - 재고 입고(IN)만 집계, 현재 필터(기간/품명) 반영
+            const startTime = ledgerFilter.startDate
+              ? new Date(`${ledgerFilter.startDate}T00:00:00`).getTime()
+              : null;
+            const endTime = ledgerFilter.endDate
+              ? new Date(`${ledgerFilter.endDate}T23:59:59`).getTime()
+              : null;
+            const productTerm = ledgerFilter.product.trim().toLowerCase();
+            const stockInTotal = (data?.stock_movements ?? [])
+              .filter((m) => m.kind === "IN")
+              .filter((m) => {
+                const t = new Date(m.ts).getTime();
+                if (Number.isFinite(t)) {
+                  if (startTime && t < startTime) return false;
+                  if (endTime && t > endTime) return false;
+                }
+                if (productTerm && !m.product_name.toLowerCase().includes(productTerm)) {
+                  return false;
+                }
+                return true;
+              })
+              .reduce((sum, m) => {
+                const amount =
+                  m.total_amount != null
+                    ? m.total_amount
+                    : m.unit_price != null
+                    ? m.unit_price * m.qty
+                    : 0;
+                return sum + amount;
+              }, 0);
+            const outflowTotal = stockInTotal; // 출금 = 매입합계로 간주
+            // 잔액: 고객 필터 반영하여 미수 합계 집계
+            const customerTerm = ledgerFilter.customer.trim().toLowerCase();
+            const hasParenDigits = /\(\s*\d{2,}\s*\)/.test(customerTerm);
+            const termDigits = customerTerm.replace(/\D/g, "");
+            const termName = customerTerm.replace(/\(.+?\)/g, "").trim();
+            const filteredBalances = (data?.customer_balances ?? []).filter((b) => {
+              if (!customerTerm) return true;
+              const name = (b.customer_name ?? "").toLowerCase();
+              const phoneDigits = (b.customer_phone ?? "").replace(/\D/g, "");
+              const nameMatches = termName ? name.includes(termName) : false;
+              const phoneMatches = termDigits.length >= 2 ? phoneDigits.includes(termDigits) : false;
+              return hasParenDigits ? nameMatches && phoneMatches : nameMatches || phoneMatches;
+            });
+            const outstandingTotal = filteredBalances.reduce(
+              (sum, b) => sum + Math.max(b.outstanding, 0),
+              0,
+            );
+            return (
+              <div className="summary-grid">
+                <div className="summary-card">
+                  <span className="summary-label">매출합계</span>
+                  <strong>{formatCurrency(salesTotal)}</strong>
+                </div>
+                <div className="summary-card">
+                  <span className="summary-label">입금</span>
+                  <strong>{formatCurrency(paymentsTotal)}</strong>
+                </div>
+                <div className="summary-card">
+                  <span className="summary-label">출금</span>
+                  <strong>{formatCurrency(outflowTotal)}</strong>
+                </div>
+                <div className="summary-card">
+                  <span className="summary-label">매입합계</span>
+                  <strong>{formatCurrency(stockInTotal)}</strong>
+                </div>
+                <div className="summary-card">
+                  <span className="summary-label">잔액</span>
+                  <strong>{formatCurrency(outstandingTotal)}</strong>
+                </div>
+              </div>
+            );
+          })()}
         </div>
       </div>
     );
