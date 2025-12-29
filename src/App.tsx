@@ -165,7 +165,7 @@ function createEmptySaleForm(): SaleFormState {
     qty: "1",
     amount: "",
     customer_id: "",
-    is_credit: false,
+    is_credit: true,
     note: "",
   };
 }
