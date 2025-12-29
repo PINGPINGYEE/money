@@ -96,16 +96,6 @@ type LedgerFilterState = {
   onlyCredit: boolean;
 };
 
-type LedgerSummaryRow = {
-  key: string;
-  customerId: number | null;
-  name: string;
-  phone: string | null;
-  qty: number;
-  total: number;
-  credit: number;
-};
-
 type ReturnCombo = {
   customerId: number | null;
   customerName: string;
@@ -708,39 +698,6 @@ function App() {
     return totals;
   }, [filteredSales]);
 
-  const ledgerSummary = useMemo<LedgerSummaryRow[]>(() => {
-    const summary = new Map<string, LedgerSummaryRow>();
-    filteredSales.forEach((sale) => {
-      const key = sale.customer_id != null ? String(sale.customer_id) : "NONE";
-      const current = summary.get(key);
-      const entry: LedgerSummaryRow =
-        current ??
-        {
-          key,
-          customerId: sale.customer_id,
-          name: sale.customer_name ?? "일반 손님",
-          phone: sale.customer_phone ?? null,
-          qty: 0,
-          total: 0,
-          credit: 0,
-        };
-      const sign = sale.is_return ? -1 : 1;
-      entry.qty += sign * sale.qty;
-      entry.total += sign * sale.total_amount;
-      if (sale.is_credit) {
-        entry.credit += sign * sale.total_amount;
-      }
-      if (!entry.phone && sale.customer_phone) {
-        entry.phone = sale.customer_phone;
-      }
-      if (entry.name === "일반 손님" && sale.customer_name) {
-        entry.name = sale.customer_name;
-      }
-      summary.set(key, entry);
-    });
-    return Array.from(summary.values()).sort((a, b) => b.total - a.total);
-  }, [filteredSales]);
-
   const monthlySales = useMemo(() => {
     if (!data) {
       return [] as Array<{
@@ -1177,7 +1134,7 @@ const handleCustomerSubmit = async (event: FormEvent<HTMLFormElement>) => {
         const sale = d.sale;
         return [
           formatDateTime(sale.ts),
-          sale.is_return ? "반품" : "판매",
+          sale.is_return ? "반품" : (sale.is_credit ? "외상" : "판매"),
           sale.customer_name ?? "일반 손님",
           sale.customer_phone ?? "",
           sale.product_name,
@@ -1257,7 +1214,7 @@ const handleCustomerSubmit = async (event: FormEvent<HTMLFormElement>) => {
         const s = d.sale;
         combined.push({
           ts: formatDateTime(s.ts),
-          type: s.is_return ? "반품" : "판매",
+          type: s.is_return ? "반품" : (s.is_credit ? "외상" : "판매"),
           product: s.product_name,
           customer: String(s.customer_name ?? "일반 손님"),
           phone: String(s.customer_phone ?? ""),
@@ -2652,7 +2609,7 @@ const handleCustomerSubmit = async (event: FormEvent<HTMLFormElement>) => {
       if (d.kind === "sale") {
         const s = d.sale;
         const isReturn = s.is_return;
-        const account = isReturn ? "반품" : "출고";
+        const account = isReturn ? "반품" : (s.is_credit ? "외상" : "출고");
         const name = String(s.customer_name ?? "일반 손님");
         const product = s.product_name;
         const qty = (isReturn ? -s.qty : s.qty).toString();
@@ -2688,7 +2645,7 @@ const handleCustomerSubmit = async (event: FormEvent<HTMLFormElement>) => {
         }
         combinedAll.push({
           ts: formatDateTime(p.ts),
-          account: "입금",
+          account: "외상 결제",
           name: String(p.customer_name ?? ""),
           product: productName,
           qty: "",
@@ -2857,48 +2814,7 @@ const handleCustomerSubmit = async (event: FormEvent<HTMLFormElement>) => {
           </div>
         </div>
 
-        <div className="panel">
-          <h3>고객별 합계</h3>
-          <div className="table-wrapper">
-            <table>
-              <thead>
-                <tr>
-                  <th>고객</th>
-                  <th>총 미터</th>
-                  <th>총 금액</th>
-                  <th>외상 금액</th>
-                  <th>남은 잔액</th>
-                </tr>
-              </thead>
-              <tbody>
-                {ledgerSummary.map((row) => {
-                  const balance =
-                    row.customerId != null
-                      ? outstandingByCustomer.get(row.customerId)
-                      : null;
-                  return (
-                    <tr
-                      key={row.key}
-                      className={
-                        balance && balance.outstanding > 0
-                          ? "credit-open"
-                          : undefined
-                      }
-                    >
-                     <td>
-                       {formatNameWithPhone(row.name, row.phone)}
-                     </td>
-                      <td>{formatNumber(row.qty)}</td>
-                      <td>{formatCurrency(row.total)}</td>
-                      <td>{formatCurrency(row.credit)}</td>
-                      <td>{formatCurrency(balance?.outstanding ?? 0)}</td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
-        </div>
+        {/* 고객별 합계 패널 제거 */}
 
         <div className="panel">
           <h3>통합 상세 내역</h3>

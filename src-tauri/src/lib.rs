@@ -1503,7 +1503,7 @@ fn fetch_customer_balances(conn: &Connection) -> Result<Vec<CustomerBalance>, Ap
             c.id,
             c.name,
             c.phone,
-            IFNULL(SUM(CASE WHEN cr.is_payment = 0 THEN cr.amount ELSE 0 END), 0) AS total_credit,
+            IFNULL(SUM(CASE WHEN cr.is_payment = 0 AND cr.sale_id IS NOT NULL THEN cr.amount ELSE 0 END), 0) AS total_credit,
             IFNULL(SUM(CASE WHEN cr.is_payment = 1 THEN cr.amount ELSE 0 END), 0) AS total_paid,
             MAX(cr.ts)
         FROM customers c
