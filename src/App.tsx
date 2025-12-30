@@ -238,7 +238,6 @@ function App() {
   const [productListPage, setProductListPage] = useState(1);
   const [productListQuery, setProductListQuery] = useState("");
   const [pendingDeleteProduct, setPendingDeleteProduct] = useState<Product | null>(null);
-  const [ledgerDetailsPage, setLedgerDetailsPage] = useState(1);
   const [ledgerCombinedPage, setLedgerCombinedPage] = useState(1);
   const [creditHistoryPage, setCreditHistoryPage] = useState(1);
   const [saleHistoryPage, setSaleHistoryPage] = useState(1);
@@ -1172,63 +1171,7 @@ const handleCustomerSubmit = async (event: FormEvent<HTMLFormElement>) => {
     }
   };
 
-  const handleExportLedger = () => {
-    if (!ledgerDetails.length) {
-      return;
-    }
-    const rows = ledgerDetails.map((d) => {
-      if (d.kind === "sale") {
-        const sale = d.sale;
-        return [
-          formatDateTime(sale.ts),
-          sale.is_return ? "반품" : (sale.is_credit ? "외상" : "판매"),
-          sale.customer_name ?? "일반 손님",
-          sale.customer_phone ?? "",
-          sale.product_name,
-          (sale.is_return ? -sale.qty : sale.qty).toString(),
-          sale.unit_price.toString(),
-          (sale.is_return ? -sale.total_amount : sale.total_amount).toString(),
-          sale.is_return
-            ? sale.is_credit
-              ? "외상 정산"
-              : "반품 완료"
-            : sale.is_credit
-            ? "외상"
-            : "완납",
-          sale.note ?? "",
-        ];
-      } else {
-        const p = d.payment;
-        return [
-          formatDateTime(p.ts),
-          "외상 결제",
-          p.customer_name,
-          p.customer_phone ?? "",
-          "",
-          "",
-          "",
-          p.amount.toString(),
-          "외상 결제",
-          p.note ?? "",
-        ];
-      }
-    });
-    exportToCsv("ledger.csv", [
-      [
-        "날짜",
-        "구분",
-        "고객",
-        "연락처",
-        "상품",
-        "미터",
-        "단가",
-        "금액",
-        "상태",
-        "비고",
-      ],
-      ...rows,
-    ]);
-  };
+  // 단일 상세 CSV는 제거, 통합 CSV만 유지
 
   const handleExportLedgerCombined = () => {
     if (!data) return;
@@ -1293,8 +1236,9 @@ const handleCustomerSubmit = async (event: FormEvent<HTMLFormElement>) => {
             unit: "",
             salesTotal: "",
             outflow: "",
-            inflow: String(Math.abs(s.total_amount)),
-            purchaseTotal: "",
+            // 반품 결제(동기화): 입금 대신 매입합계로 기록
+            inflow: "",
+            purchaseTotal: String(Math.abs(s.total_amount)),
             balance: String(outstandingByCustomer.get(s.customer_id)?.outstanding ?? ""),
             saleId: s.origin_sale_id != null ? String(s.origin_sale_id) : (s.id != null ? String(s.id) : ""),
             note: "반품 결제(동기화)",
@@ -2674,12 +2618,6 @@ const handleCustomerSubmit = async (event: FormEvent<HTMLFormElement>) => {
     if (!data) {
       return null;
     }
-    const detailsPageSize = 10;
-    const totalDetails = ledgerDetails.length;
-    const totalDetailsPages = Math.max(1, Math.ceil(totalDetails / detailsPageSize));
-    const currentDetailsPage = Math.min(ledgerDetailsPage, totalDetailsPages);
-    const detailsStart = (currentDetailsPage - 1) * detailsPageSize;
-    const pagedLedgerDetails = ledgerDetails.slice(detailsStart, detailsStart + detailsPageSize);
     // 통합 상세 내역 계산 (요청 컬럼 기준)
     type CombinedRow = {
       ts: string;
@@ -2858,9 +2796,6 @@ const handleCustomerSubmit = async (event: FormEvent<HTMLFormElement>) => {
               >
                 필터 초기화
               </button>
-              <button type="button" onClick={handleExportLedger}>
-                CSV 내보내기
-              </button>
               <button type="button" onClick={handleExportLedgerCombined}>
                 CSV 내보내기(통합)
               </button>
@@ -2951,118 +2886,6 @@ const handleCustomerSubmit = async (event: FormEvent<HTMLFormElement>) => {
                 setLedgerCombinedPage((p) => Math.min(totalCombinedPages, p + 1))
               }
               disabled={currentCombinedPage >= totalCombinedPages}
-            >
-              다음
-            </button>
-          </div>
-        </div>
-
-        <div className="panel">
-          <h3>상세 내역</h3>
-          <div className="table-wrapper">
-            <table>
-              <thead>
-                <tr>
-                  <th>일시</th>
-                  <th>구분</th>
-                  <th>고객</th>
-                  <th>상품</th>
-                  <th>미터</th>
-                  <th>단가</th>
-                  <th>금액</th>
-                  <th>상태</th>
-                  <th>비고</th>
-                </tr>
-              </thead>
-              <tbody>
-                {pagedLedgerDetails.map((d) => {
-                  if (d.kind === "sale") {
-                    const sale = d.sale;
-                    return (
-                      <tr
-                        key={`sale-${sale.id}`}
-                        className={
-                          sale.is_return
-                            ? "return-row"
-                            : sale.is_credit
-                            ? "credit-row"
-                            : undefined
-                        }
-                      >
-                        <td>{formatDateTime(sale.ts)}</td>
-                        <td>
-                          {sale.is_return ? (
-                            <span className="badge badge-return">반품</span>
-                          ) : (
-                            <span className="badge">판매</span>
-                          )}
-                        </td>
-                        <td>
-                          {sale.customer_name && sale.customer_name.trim()
-                            ? formatNameWithPhone(sale.customer_name, sale.customer_phone)
-                            : "일반 손님"}
-                        </td>
-                        <td>{sale.product_name}</td>
-                        <td>{formatNumber(sale.is_return ? -sale.qty : sale.qty)}</td>
-                        <td>{formatCurrency(sale.unit_price)}</td>
-                        <td>{formatCurrency(sale.is_return ? -sale.total_amount : sale.total_amount)}</td>
-                        <td>
-                          {sale.is_return ? (
-                            sale.is_credit ? (
-                              <span className="badge badge-credit">외상 정산</span>
-                            ) : (
-                              <span className="badge">반품 완료</span>
-                            )
-                          ) : sale.is_credit ? (
-                            <span className="badge badge-credit">외상</span>
-                          ) : (
-                            <span className="badge">완납</span>
-                          )}
-                        </td>
-                        <td>{sale.note ?? "-"}</td>
-                      </tr>
-                    );
-                  } else {
-                    const p = d.payment;
-                    return (
-                      <tr key={`payment-${p.id}`}>
-                        <td>{formatDateTime(p.ts)}</td>
-                        <td>
-                          <span className="badge">외상 결제</span>
-                        </td>
-                        <td>{formatNameWithPhone(p.customer_name, p.customer_phone)}</td>
-                        <td>-</td>
-                        <td>-</td>
-                        <td>-</td>
-                        <td>{formatCurrency(p.amount)}</td>
-                        <td>외상 결제</td>
-                        <td>{p.note ?? "-"}</td>
-                      </tr>
-                    );
-                  }
-                })}
-              </tbody>
-            </table>
-          </div>
-          <div className="form-actions">
-            <button
-              type="button"
-              className="secondary"
-              onClick={() => setLedgerDetailsPage((p) => Math.max(1, p - 1))}
-              disabled={currentDetailsPage <= 1}
-            >
-              이전
-            </button>
-            <span style={{ margin: "0 8px" }}>
-              페이지 {currentDetailsPage} / {totalDetailsPages}
-            </span>
-            <button
-              type="button"
-              className="secondary"
-              onClick={() =>
-                setLedgerDetailsPage((p) => Math.min(totalDetailsPages, p + 1))
-              }
-              disabled={currentDetailsPage >= totalDetailsPages}
             >
               다음
             </button>
