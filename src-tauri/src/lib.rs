@@ -166,6 +166,17 @@ impl DbState {
             "archived",
             "ALTER TABLE products ADD COLUMN archived INTEGER NOT NULL DEFAULT 0",
         )?;
+        // link return-specific credit rows
+        ensure_column(
+            conn,
+            "credits",
+            "return_id",
+            "ALTER TABLE credits ADD COLUMN return_id INTEGER REFERENCES sales(id)",
+        )?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_credits_return ON credits(return_id);",
+            [],
+        )?;
         ensure_column(
             conn,
             "sales",
@@ -958,25 +969,14 @@ fn update_return(state: State<DbState>, payload: ReturnUpdatePayload) -> Command
         params![payload.qty, unit, total, payload.note.as_deref(), payload.id],
     )
     .map_err(map_sql_err)?;
-    // credit diff adjustment
+    // credit update to reflect new return amount (update linked payment instead of diff row)
     if was_credit {
-        let prev_total: f64 = prev_unit * prev_qty;
-        let diff = total - prev_total;
-        if diff.abs() > f64::EPSILON {
-            if let Some(cid) = customer_id {
-                tx.execute(
-                    "INSERT INTO credits (ts, customer_id, sale_id, amount, is_payment, note) VALUES (?, ?, NULL, ?, ?, ?)",
-                    params![
-                        now_iso(),
-                        cid,
-                        diff.abs(),
-                        if diff > 0.0 { 1 } else { 0 },
-                        Some("반품 수정 조정")
-                    ],
-                )
-                .map_err(map_sql_err)?;
-            }
-        }
+        // set credit amount for this specific return (if present)
+        tx.execute(
+            "UPDATE credits SET amount = ?, note = ? WHERE return_id = ?",
+            params![total, payload.note.as_deref(), payload.id],
+        )
+        .map_err(map_sql_err)?;
     }
     tx.commit().map_err(map_sql_err)?;
     load_app_data(&state).map_err(Into::into)
@@ -1014,13 +1014,9 @@ fn delete_return(state: State<DbState>, return_id: i64) -> CommandResult<AppData
     tx.execute("DELETE FROM sales WHERE id = ?", params![return_id])
         .map_err(map_sql_err)?;
     if was_credit {
-        if let Some(cid) = customer_id {
-            tx.execute(
-                "INSERT INTO credits (ts, customer_id, sale_id, amount, is_payment, note) VALUES (?, ?, NULL, ?, 0, ?)",
-                params![now_iso(), cid, total_amount, Some("반품 삭제 조정")],
-            )
+        // remove the payment that was created for this return
+        tx.execute("DELETE FROM credits WHERE return_id = ?", params![return_id])
             .map_err(map_sql_err)?;
-        }
     }
     tx.commit().map_err(map_sql_err)?;
     load_app_data(&state).map_err(Into::into)
@@ -1211,9 +1207,9 @@ fn insert_return_for_sale(
         if let Some(cid) = customer_id {
             let credit_note = note.unwrap_or("반품 정산");
             tx.execute(
-                "INSERT INTO credits (ts, customer_id, sale_id, amount, is_payment, note)
-                 VALUES (?, ?, ?, ?, 1, ?)",
-                params![ts, cid, origin_sale_id, total_amount, credit_note],
+                "INSERT INTO credits (ts, customer_id, sale_id, return_id, amount, is_payment, note)
+                 VALUES (?, ?, ?, ?, ?, 1, ?)",
+                params![ts, cid, origin_sale_id, return_sale_id, total_amount, credit_note],
             )?;
         }
     }

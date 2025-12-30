@@ -253,6 +253,7 @@ function App() {
     id: number;
     qty: string;
     amount: string;
+    unit_price: string;
     customer_id: string;
     is_credit: boolean;
     note: string;
@@ -453,9 +454,17 @@ function App() {
       ts: payment.ts,
       payment,
     }));
-    return [...saleDetails, ...paymentDetails].sort((a, b) =>
-      a.ts < b.ts ? 1 : -1,
-    );
+    // 최신순 정렬: ts가 같으면 id로 안정적으로 내림차순 정렬
+    const list = [...saleDetails, ...paymentDetails];
+    list.sort((a, b) => {
+      const at = new Date(a.ts).getTime();
+      const bt = new Date(b.ts).getTime();
+      if (at !== bt) return at < bt ? 1 : -1; // 최신 먼저
+      const aid = a.kind === "sale" ? a.sale.id : a.payment.id;
+      const bid = b.kind === "sale" ? b.sale.id : b.payment.id;
+      return aid < bid ? 1 : -1; // 큰 id(나중에 생성) 먼저
+    });
+    return list;
   }, [filteredSales, filteredPayments]);
 
   // 각 외상/결제 이벤트 시점의 고객별 남은 잔액(누적)에 대한 맵 (entryId -> outstandingAfter)
@@ -464,7 +473,13 @@ function App() {
     if (!data) return map;
     const byCustomer = new Map<number, CreditEntry[]>();
     // 시간 오름차순으로 정렬 후 고객별로 누적
-    const sorted = [...data.credits].sort((a, b) => (a.ts < b.ts ? -1 : a.ts > b.ts ? 1 : 0));
+    const sorted = [...data.credits].sort((a, b) => {
+      if (a.ts === b.ts) {
+        // 동일 초 타임스탬프 정렬 안정화: id 오름차순
+        return a.id - b.id;
+      }
+      return a.ts < b.ts ? -1 : 1;
+    });
     for (const entry of sorted) {
       const arr = byCustomer.get(entry.customer_id) ?? [];
       arr.push(entry);
@@ -479,6 +494,38 @@ function App() {
           outstanding += e.amount;
         }
         map.set(e.id, outstanding);
+      }
+    });
+    return map;
+  }, [data]);
+
+  // 각 외상/결제 이벤트 직전의 고객별 남은 잔액(누적) 맵 (entryId -> outstandingBefore)
+  const creditOutstandingBeforeById = useMemo(() => {
+    const map = new Map<number, number>();
+    if (!data) return map;
+    const byCustomer = new Map<number, CreditEntry[]>();
+    const sorted = [...data.credits].sort((a, b) => {
+      if (a.ts === b.ts) {
+        return a.id - b.id;
+      }
+      return a.ts < b.ts ? -1 : 1;
+    });
+    for (const entry of sorted) {
+      const arr = byCustomer.get(entry.customer_id) ?? [];
+      arr.push(entry);
+      byCustomer.set(entry.customer_id, arr);
+    }
+    byCustomer.forEach((entries) => {
+      let outstanding = 0;
+      for (const e of entries) {
+        // 기록 전에 직전 잔액 저장
+        map.set(e.id, outstanding);
+        // 그 다음 현재 엔트리를 반영
+        if (e.is_payment) {
+          outstanding = Math.max(outstanding - e.amount, 0);
+        } else {
+          outstanding += e.amount;
+        }
       }
     });
     return map;
@@ -1212,6 +1259,11 @@ const handleCustomerSubmit = async (event: FormEvent<HTMLFormElement>) => {
     ledgerDetails.forEach((d) => {
       if (d.kind === "sale") {
         const s = d.sale;
+        // CSV: 현재 시점의 고객 잔액으로 출력
+        const saleOutstanding =
+          !s.is_return && s.is_credit && s.customer_id != null
+            ? String(outstandingByCustomer.get(s.customer_id)?.outstanding ?? "")
+            : "";
         combined.push({
           ts: formatDateTime(s.ts),
           type: s.is_return ? "반품" : (s.is_credit ? "외상" : "판매"),
@@ -1224,12 +1276,44 @@ const handleCustomerSubmit = async (event: FormEvent<HTMLFormElement>) => {
           outflow: "",
           inflow: "",
           purchaseTotal: "",
-          balance: "",
+          balance: saleOutstanding,
           saleId: s.id != null ? String(s.id) : "",
           note: String(s.note ?? ""),
         });
+
+        // 반품인 경우: 실제 결제 레코드 대신 반품 금액을 외상 결제로 동기화해 별도 행으로 출력
+        if (s.is_return && s.customer_id != null && s.is_credit) {
+          combined.push({
+            ts: formatDateTime(s.ts),
+            type: "외상 결제",
+            product: "",
+            customer: String(s.customer_name ?? ""),
+            phone: String(s.customer_phone ?? ""),
+            qty: "",
+            unit: "",
+            salesTotal: "",
+            outflow: "",
+            inflow: String(Math.abs(s.total_amount)),
+            purchaseTotal: "",
+            balance: String(outstandingByCustomer.get(s.customer_id)?.outstanding ?? ""),
+            saleId: s.origin_sale_id != null ? String(s.origin_sale_id) : (s.id != null ? String(s.id) : ""),
+            note: "반품 결제(동기화)",
+          });
+        }
       } else {
         const p = d.payment;
+        // 반품 관련 실제 결제 메모는 CSV 중복을 피하기 위해 제외
+        const noteLower = (p.note ?? "").toLowerCase();
+        const isReturnRelatedPayment =
+          noteLower.includes("반품 정산") ||
+          noteLower.includes("반품 수정 조정") ||
+          noteLower.includes("반품 금액 조정");
+        if (isReturnRelatedPayment) {
+          return;
+        }
+        const before = creditOutstandingBeforeById.get(p.id) ?? 0;
+        const after = creditOutstandingById.get(p.id) ?? before;
+        const inflowNow = Math.max(before - after, 0);
         combined.push({
           ts: formatDateTime(p.ts),
           type: "외상 결제",
@@ -1240,9 +1324,11 @@ const handleCustomerSubmit = async (event: FormEvent<HTMLFormElement>) => {
           unit: "",
           salesTotal: "",
           outflow: "",
-          inflow: String(p.amount),
+          // 결제 이벤트 전후의 잔액 감소분을 현재 시점 기준 입금으로 반영
+          inflow: String(inflowNow),
           purchaseTotal: "",
-          balance: String(creditOutstandingById.get(p.id) ?? 0),
+          // CSV에서는 결제 행도 '현재 시점'의 고객 잔액을 표시하도록 통일
+          balance: String(outstandingByCustomer.get(p.customer_id)?.outstanding ?? ""),
           saleId: p.sale_id != null ? String(p.sale_id) : "",
           note: String(p.note ?? ""),
         });
@@ -2531,6 +2617,7 @@ const handleCustomerSubmit = async (event: FormEvent<HTMLFormElement>) => {
                                 id: sale.id,
                                 qty: sale.qty.toString(),
                                 amount: sale.total_amount.toString(),
+                              unit_price: sale.unit_price.toString(),
                                 customer_id: sale.customer_id ? String(sale.customer_id) : "",
                                 is_credit: sale.is_credit,
                                 note: sale.note ?? "",
@@ -2615,16 +2702,11 @@ const handleCustomerSubmit = async (event: FormEvent<HTMLFormElement>) => {
         const qty = (isReturn ? -s.qty : s.qty).toString();
         const unit = s.unit_price.toString();
         const amount = (isReturn ? -s.total_amount : s.total_amount).toString();
-        let outstanding = "";
-        // 외상 판매 시점의 남은외상금액 표시 (해당 판매가 외상인 경우)
-        if (!isReturn && s.is_credit) {
-          const creditForSale = data?.credits.find(
-            (cr) => cr.sale_id === s.id && !cr.is_payment,
-          );
-          if (creditForSale) {
-            outstanding = String(creditOutstandingById.get(creditForSale.id) ?? "");
-          }
-        }
+        // 현재 시점의 고객 미수 잔액 표시
+        const outstanding =
+          !isReturn && s.is_credit && s.customer_id != null
+            ? String(outstandingByCustomer.get(s.customer_id)?.outstanding ?? "")
+            : "";
         // 반품 행 자체는 입금과 별도 라인으로 존재하므로 여기서는 남은외상금액 미표시
         combinedAll.push({
           ts: formatDateTime(s.ts),
@@ -2833,8 +2915,10 @@ const handleCustomerSubmit = async (event: FormEvent<HTMLFormElement>) => {
                 </tr>
               </thead>
               <tbody>
-                {pagedCombined.map((r, idx) => (
-                  <tr key={`combined-${combinedStart + idx}`}>
+                {pagedCombined.map((r) => {
+                  const stableKey = `row-${r.ts}-${r.account}-${r.name}-${r.product}-${r.amount}`;
+                  return (
+                  <tr key={stableKey}>
                     <td>{r.ts}</td>
                     <td>{r.name || "-"}</td>
                     <td>{r.product || "-"}</td>
@@ -2844,7 +2928,7 @@ const handleCustomerSubmit = async (event: FormEvent<HTMLFormElement>) => {
                     <td>{r.amount ? formatCurrency(Number(r.amount)) : "-"}</td>
                     <td>{r.outstanding ? formatCurrency(Number(r.outstanding)) : "-"}</td>
                   </tr>
-                ))}
+                  );})}
               </tbody>
             </table>
           </div>
@@ -3788,8 +3872,8 @@ const handleCustomerSubmit = async (event: FormEvent<HTMLFormElement>) => {
                   setError("미터은 0보다 커야 합니다.");
                   return;
                 }
-                const amount = parseNumber(saleEdit.amount);
-                const unit = qty > 0 ? amount / qty : 0;
+                // 단가는 고정, 총액은 단가*수량으로 변경
+                const unit = parseNumber(saleEdit.unit_price);
                 try {
                   await runAction(() =>
                     updateSale({
@@ -3815,7 +3899,15 @@ const handleCustomerSubmit = async (event: FormEvent<HTMLFormElement>) => {
                   step="0.01"
                   value={saleEdit.qty}
                   onChange={(e) =>
-                    setSaleEdit((prev) => (prev ? { ...prev, qty: e.target.value } : prev))
+                    setSaleEdit((prev) => {
+                      if (!prev) return prev;
+                      const nextQty = e.target.value;
+                      const qtyNum = parseNumber(nextQty || "0");
+                      const unit = parseNumber(prev.unit_price || "0");
+                      const nextAmount =
+                        qtyNum > 0 && unit > 0 ? String(qtyNum * unit) : nextQty ? "0" : prev.amount;
+                      return { ...prev, qty: nextQty, amount: nextAmount };
+                    })
                   }
                 />
               </label>
