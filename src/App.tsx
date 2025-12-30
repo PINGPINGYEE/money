@@ -877,21 +877,7 @@ function App() {
     selectedReturnCombo,
   ]);
 
-  const ledgerTotals = useMemo(() => {
-    const totals = filteredSales.reduce(
-      (acc, sale) => {
-        const sign = sale.is_return ? -1 : 1;
-        acc.total += sign * sale.total_amount;
-        acc.qty += sign * sale.qty;
-        if (sale.is_credit) {
-          acc.credit += sign * sale.total_amount;
-        }
-        return acc;
-      },
-      { total: 0, credit: 0, qty: 0 },
-    );
-    return totals;
-  }, [filteredSales]);
+  // 사용하지 않게 된 집계(상단 요약에서 직접 계산)
 
   const monthlySales = useMemo(() => {
     if (!data) {
@@ -1481,7 +1467,6 @@ const handleCustomerSubmit = async (event: FormEvent<HTMLFormElement>) => {
       "출금",
       "입금",
       "매입합계",
-      "잔액",
       "관련 판매",
       "비고",
     ];
@@ -1497,11 +1482,28 @@ const handleCustomerSubmit = async (event: FormEvent<HTMLFormElement>) => {
       r.outflow,
       r.inflow,
       r.purchaseTotal,
-      r.balance,
       r.saleId,
       r.note,
     ]);
-    exportToCsv("ledger-combined.csv", [header, ...rows]);
+    // 고객 필터 결과가 단일 고객이면 해당 고객의 현재 미수 잔액을 비고에 표기
+    const uniqueCustomerIds = new Set<number>();
+    ledgerDetails.forEach((d) => {
+      if (d.kind === "sale") {
+        if (d.sale.customer_id != null) uniqueCustomerIds.add(d.sale.customer_id);
+      } else {
+        if (d.payment.customer_id != null) uniqueCustomerIds.add(d.payment.customer_id);
+      }
+    });
+    let footerText = "현재 고객 미수 잔액: -";
+    if (uniqueCustomerIds.size === 1) {
+      const onlyId = Array.from(uniqueCustomerIds)[0];
+      const currentOutstanding = outstandingByCustomer.get(onlyId)?.outstanding ?? 0;
+      footerText = `현재 고객 미수 잔액: ${String(currentOutstanding)}`;
+    }
+    const footerNote = [
+      "", "", "", "", "", "", "", "", "", "", "", "", footerText,
+    ];
+    exportToCsv("ledger-combined.csv", [header, ...rows, footerNote]);
   };
   const handleExportInventory = () => {
     if (!data) {
@@ -2898,31 +2900,56 @@ const handleCustomerSubmit = async (event: FormEvent<HTMLFormElement>) => {
         </div>
 
         <div className="panel">
-          <div className="summary-grid">
-            <div className="summary-card">
-              <span className="summary-label">총 판매 금액</span>
-              <strong>{formatCurrency(ledgerTotals.total)}</strong>
-            </div>
-            <div className="summary-card">
-              <span className="summary-label">총 판매 미터</span>
-              <strong>{formatNumber(ledgerTotals.qty)}</strong>
-            </div>
-            <div className="summary-card">
-              <span className="summary-label">외상 금액</span>
-              <strong>{formatCurrency(ledgerTotals.credit)}</strong>
-            </div>
-            <div className="summary-card">
-              <span className="summary-label">미수 잔액 합계</span>
-              <strong>
-                {formatCurrency(
-                  data.customer_balances.reduce(
-                    (sum, balance) => sum + Math.max(balance.outstanding, 0),
-                    0,
-                  ),
-                )}
-              </strong>
-            </div>
-          </div>
+          {(() => {
+            // 매출합계: 현재 필터(날짜/고객/품명, 반품 부호) 반영
+            const salesTotal = ledgerDetails.reduce((sum, d) => {
+              if (d.kind === "sale") {
+                const sign = d.sale.is_return ? -1 : 1;
+                return sum + sign * d.sale.total_amount;
+              }
+              return sum;
+            }, 0);
+            // 잔액 합계: 고객 검색이 비어 있으면 전체, 단일 매칭이면 그 고객만, 복수 매칭이면 합계
+            const customerTermRaw = ledgerFilter.customer.trim();
+            const customerTerm = customerTermRaw.toLowerCase();
+            const hasParenDigits = /\(\s*\d{2,}\s*\)/.test(customerTerm);
+            const termDigits = customerTerm.replace(/\D/g, "");
+            const termName = customerTerm.replace(/\(.+?\)/g, "").trim();
+            const filteredBalances = (data?.customer_balances ?? []).filter((b) => {
+              if (!customerTerm) return true;
+              const name = (b.customer_name ?? "").toLowerCase();
+              const phoneDigits = (b.customer_phone ?? "").replace(/\D/g, "");
+              const nameMatches = termName ? name.includes(termName) : false;
+              const phoneMatches = termDigits.length >= 2 ? phoneDigits.includes(termDigits) : false;
+              return hasParenDigits ? nameMatches && phoneMatches : nameMatches || phoneMatches;
+            });
+            let outstandingTotal = 0;
+            if (!customerTerm) {
+              outstandingTotal = (data?.customer_balances ?? []).reduce(
+                (sum, b) => sum + Math.max(b.outstanding, 0),
+                0,
+              );
+            } else if (filteredBalances.length === 1) {
+              outstandingTotal = Math.max(filteredBalances[0].outstanding, 0);
+            } else {
+              outstandingTotal = filteredBalances.reduce(
+                (sum, b) => sum + Math.max(b.outstanding, 0),
+                0,
+              );
+            }
+            return (
+              <div className="summary-grid">
+                <div className="summary-card">
+                  <span className="summary-label">매출합계</span>
+                  <strong>{formatCurrency(salesTotal)}</strong>
+                </div>
+                <div className="summary-card">
+                  <span className="summary-label">잔액</span>
+                  <strong>{formatCurrency(outstandingTotal)}</strong>
+                </div>
+              </div>
+            );
+          })()}
         </div>
 
         {/* 고객별 합계 패널 제거 */}
@@ -2944,7 +2971,6 @@ const handleCustomerSubmit = async (event: FormEvent<HTMLFormElement>) => {
                   <th>출금</th>
                   <th>입금</th>
                   <th>매입합계</th>
-                  <th>잔액</th>
                   <th>관련 판매</th>
                   <th>비고</th>
                 </tr>
@@ -2965,7 +2991,6 @@ const handleCustomerSubmit = async (event: FormEvent<HTMLFormElement>) => {
                     <td>{r.outflow ? formatCurrency(Number(r.outflow)) : "-"}</td>
                     <td>{r.inflow ? formatCurrency(Number(r.inflow)) : "-"}</td>
                     <td>{r.purchaseTotal ? formatCurrency(Number(r.purchaseTotal)) : "-"}</td>
-                    <td>{r.balance ? formatCurrency(Number(r.balance)) : "-"}</td>
                     <td>{r.saleId || "-"}</td>
                     <td>{r.note || "-"}</td>
                   </tr>
@@ -2998,97 +3023,7 @@ const handleCustomerSubmit = async (event: FormEvent<HTMLFormElement>) => {
           </div>
         </div>
 
-        <div className="panel">
-          <h3>총합 내역</h3>
-          {(() => {
-            // 매출합계/입금 합계는 ledgerDetails 기반(현재 필터 반영)
-            const salesTotal = ledgerDetails.reduce((sum, d) => {
-              if (d.kind === "sale") {
-                const sign = d.sale.is_return ? -1 : 1;
-                return sum + sign * d.sale.total_amount;
-              }
-              return sum;
-            }, 0);
-            const paymentsTotal = ledgerDetails.reduce((sum, d) => {
-              if (d.kind === "payment") {
-                return sum + d.payment.amount;
-              }
-              return sum;
-            }, 0);
-            // 매입합계(입고 금액) - 재고 입고(IN)만 집계, 현재 필터(기간/품명) 반영
-            const startTime = ledgerFilter.startDate
-              ? new Date(`${ledgerFilter.startDate}T00:00:00`).getTime()
-              : null;
-            const endTime = ledgerFilter.endDate
-              ? new Date(`${ledgerFilter.endDate}T23:59:59`).getTime()
-              : null;
-            const productTerm = ledgerFilter.product.trim().toLowerCase();
-            const stockInTotal = (data?.stock_movements ?? [])
-              .filter((m) => m.kind === "IN")
-              .filter((m) => {
-                const t = new Date(m.ts).getTime();
-                if (Number.isFinite(t)) {
-                  if (startTime && t < startTime) return false;
-                  if (endTime && t > endTime) return false;
-                }
-                if (productTerm && !m.product_name.toLowerCase().includes(productTerm)) {
-                  return false;
-                }
-                return true;
-              })
-              .reduce((sum, m) => {
-                const amount =
-                  m.total_amount != null
-                    ? m.total_amount
-                    : m.unit_price != null
-                    ? m.unit_price * m.qty
-                    : 0;
-                return sum + amount;
-              }, 0);
-            const outflowTotal = stockInTotal; // 출금 = 매입합계로 간주
-            // 잔액: 고객 필터 반영하여 미수 합계 집계
-            const customerTerm = ledgerFilter.customer.trim().toLowerCase();
-            const hasParenDigits = /\(\s*\d{2,}\s*\)/.test(customerTerm);
-            const termDigits = customerTerm.replace(/\D/g, "");
-            const termName = customerTerm.replace(/\(.+?\)/g, "").trim();
-            const filteredBalances = (data?.customer_balances ?? []).filter((b) => {
-              if (!customerTerm) return true;
-              const name = (b.customer_name ?? "").toLowerCase();
-              const phoneDigits = (b.customer_phone ?? "").replace(/\D/g, "");
-              const nameMatches = termName ? name.includes(termName) : false;
-              const phoneMatches = termDigits.length >= 2 ? phoneDigits.includes(termDigits) : false;
-              return hasParenDigits ? nameMatches && phoneMatches : nameMatches || phoneMatches;
-            });
-            const outstandingTotal = filteredBalances.reduce(
-              (sum, b) => sum + Math.max(b.outstanding, 0),
-              0,
-            );
-            return (
-              <div className="summary-grid">
-                <div className="summary-card">
-                  <span className="summary-label">매출합계</span>
-                  <strong>{formatCurrency(salesTotal)}</strong>
-                </div>
-                <div className="summary-card">
-                  <span className="summary-label">입금</span>
-                  <strong>{formatCurrency(paymentsTotal)}</strong>
-                </div>
-                <div className="summary-card">
-                  <span className="summary-label">출금</span>
-                  <strong>{formatCurrency(outflowTotal)}</strong>
-                </div>
-                <div className="summary-card">
-                  <span className="summary-label">매입합계</span>
-                  <strong>{formatCurrency(stockInTotal)}</strong>
-                </div>
-                <div className="summary-card">
-                  <span className="summary-label">잔액</span>
-                  <strong>{formatCurrency(outstandingTotal)}</strong>
-                </div>
-              </div>
-            );
-          })()}
-        </div>
+        {/* 총합 내역 패널은 간소화하여 상단 요약(매출합계/잔액)만 남겼습니다 */}
       </div>
     );
   };
