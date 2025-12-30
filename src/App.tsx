@@ -530,6 +530,155 @@ function App() {
     return map;
   }, [data]);
 
+  // 통합 CSV/화면 공통 레코드 타입과 생성 로직
+  type CombinedRecord = {
+    ts: string;
+    type: string;
+    product: string;
+    customer: string;
+    phone: string;
+    qty: string;
+    unit: string;
+    salesTotal: string;
+    outflow: string;
+    inflow: string;
+    purchaseTotal: string;
+    balance: string;
+    saleId: string;
+    note: string;
+  };
+
+  const computeCombinedRecords = () => {
+    if (!data) return [] as CombinedRecord[];
+    const startTime = ledgerFilter.startDate
+      ? new Date(`${ledgerFilter.startDate}T00:00:00`).getTime()
+      : null;
+    const endTime = ledgerFilter.endDate
+      ? new Date(`${ledgerFilter.endDate}T23:59:59`).getTime()
+      : null;
+    const productTerm = ledgerFilter.product.trim().toLowerCase();
+    const combined: CombinedRecord[] = [];
+    // 판매/결제
+    ledgerDetails.forEach((d) => {
+      if (d.kind === "sale") {
+        const s = d.sale;
+        const saleOutstanding =
+          !s.is_return && s.is_credit && s.customer_id != null
+            ? String(outstandingByCustomer.get(s.customer_id)?.outstanding ?? "")
+            : "";
+        combined.push({
+          ts: formatDateTime(s.ts),
+          type: s.is_return ? "반품" : (s.is_credit ? "외상" : "판매"),
+          product: s.product_name,
+          customer: String(s.customer_name ?? "일반 손님"),
+          phone: String(s.customer_phone ?? ""),
+          qty: (s.is_return ? -s.qty : s.qty).toString(),
+          unit: s.unit_price.toString(),
+          salesTotal: (s.is_return ? -s.total_amount : s.total_amount).toString(),
+          outflow: "",
+          inflow: "",
+          purchaseTotal: "",
+          balance: saleOutstanding,
+          saleId: s.id != null ? String(s.id) : "",
+          note: String(s.note ?? ""),
+        });
+        // 반품 외상인 경우, 동기화된 결제 행 추가 (입금 대신 매입합계로 기록)
+        if (s.is_return && s.customer_id != null && s.is_credit) {
+          combined.push({
+            ts: formatDateTime(s.ts),
+            type: "외상 결제",
+            product: "",
+            customer: String(s.customer_name ?? ""),
+            phone: String(s.customer_phone ?? ""),
+            qty: "",
+            unit: "",
+            salesTotal: "",
+            outflow: "",
+            inflow: "",
+            purchaseTotal: String(Math.abs(s.total_amount)),
+            balance: String(outstandingByCustomer.get(s.customer_id)?.outstanding ?? ""),
+            saleId: s.origin_sale_id != null ? String(s.origin_sale_id) : (s.id != null ? String(s.id) : ""),
+            note: "반품 결제(동기화)",
+          });
+        }
+      } else {
+        const p = d.payment;
+        // 반품 관련 실제 결제는 CSV/화면에서 중복 방지를 위해 제외
+        const noteLower = (p.note ?? "").toLowerCase();
+        const isReturnRelatedPayment =
+          noteLower.includes("반품 정산") ||
+          noteLower.includes("반품 수정 조정") ||
+          noteLower.includes("반품 금액 조정");
+        if (isReturnRelatedPayment) {
+          return;
+        }
+        const before = creditOutstandingBeforeById.get(p.id) ?? 0;
+        const after = creditOutstandingById.get(p.id) ?? before;
+        const inflowNow = Math.max(before - after, 0);
+        combined.push({
+          ts: formatDateTime(p.ts),
+          type: "외상 결제",
+          product: "",
+          customer: String(p.customer_name ?? ""),
+          phone: String(p.customer_phone ?? ""),
+          qty: "",
+          unit: "",
+          salesTotal: "",
+          outflow: "",
+          inflow: String(inflowNow),
+          purchaseTotal: "",
+          balance: String(outstandingByCustomer.get(p.customer_id)?.outstanding ?? ""),
+          saleId: p.sale_id != null ? String(p.sale_id) : "",
+          note: String(p.note ?? ""),
+        });
+      }
+    });
+    // 입고(매입)
+    (data.stock_movements ?? [])
+      .filter((m) => m.kind === "IN")
+      .filter((m) => {
+        // 고객 검색이 있는 경우, 해당 고객 데이터만 요청했으므로 고객이 없는 입고 행은 제외
+        const customerTerm = ledgerFilter.customer.trim().toLowerCase();
+        if (customerTerm) {
+          return false;
+        }
+        const t = new Date(m.ts).getTime();
+        if (Number.isFinite(t)) {
+          if (startTime && t < startTime) return false;
+          if (endTime && t > endTime) return false;
+        }
+        if (productTerm && !m.product_name.toLowerCase().includes(productTerm)) {
+          return false;
+        }
+        return true;
+      })
+      .forEach((m) => {
+        const amount =
+          m.total_amount != null
+            ? m.total_amount
+            : m.unit_price != null
+            ? m.unit_price * m.qty
+            : 0;
+        combined.push({
+          ts: formatDateTime(m.ts),
+          type: "입고",
+          product: m.product_name,
+          customer: "",
+          phone: "",
+          qty: String(m.qty),
+          unit: m.unit_price != null ? String(m.unit_price) : "",
+          salesTotal: "",
+          outflow: String(amount),
+          inflow: "",
+          purchaseTotal: String(amount),
+          balance: "",
+          saleId: m.sale_id != null ? String(m.sale_id) : "",
+          note: String(m.note ?? ""),
+        });
+      });
+    return combined;
+  };
+
   const returnsBySale = useMemo(() => {
     const map = new Map<number, number>();
     data?.sales.forEach((sale) => {
@@ -2618,63 +2767,8 @@ const handleCustomerSubmit = async (event: FormEvent<HTMLFormElement>) => {
     if (!data) {
       return null;
     }
-    // 통합 상세 내역 계산 (요청 컬럼 기준)
-    type CombinedRow = {
-      ts: string;
-      account: string; // 반품 | 출고 | 입금
-      name: string; // 고객명
-      product: string; // 거래 품명
-      qty: string; // 미터
-      unit: string; // 단가
-      amount: string; // 금액
-      outstanding: string; // 남은외상금액
-    };
-    const combinedAll: CombinedRow[] = [];
-    ledgerDetails.forEach((d) => {
-      if (d.kind === "sale") {
-        const s = d.sale;
-        const isReturn = s.is_return;
-        const account = isReturn ? "반품" : (s.is_credit ? "외상" : "출고");
-        const name = String(s.customer_name ?? "일반 손님");
-        const product = s.product_name;
-        const qty = (isReturn ? -s.qty : s.qty).toString();
-        const unit = s.unit_price.toString();
-        const amount = (isReturn ? -s.total_amount : s.total_amount).toString();
-        // 현재 시점의 고객 미수 잔액 표시
-        const outstanding =
-          !isReturn && s.is_credit && s.customer_id != null
-            ? String(outstandingByCustomer.get(s.customer_id)?.outstanding ?? "")
-            : "";
-        // 반품 행 자체는 입금과 별도 라인으로 존재하므로 여기서는 남은외상금액 미표시
-        combinedAll.push({
-          ts: formatDateTime(s.ts),
-          account,
-          name,
-          product,
-          qty,
-          unit,
-          amount,
-          outstanding,
-        });
-      } else {
-        const p = d.payment;
-        let productName = "";
-        if (p.sale_id != null) {
-          const relatedSale = data?.sales.find((s) => s.id === p.sale_id);
-          productName = relatedSale?.product_name ?? "";
-        }
-        combinedAll.push({
-          ts: formatDateTime(p.ts),
-          account: "외상 결제",
-          name: String(p.customer_name ?? ""),
-          product: productName,
-          qty: "",
-          unit: "",
-          amount: String(p.amount),
-          outstanding: String(creditOutstandingById.get(p.id) ?? ""),
-        });
-      }
-    });
+    // 통합 상세 내역: CSV(통합)과 동일한 로직/항목 사용
+    const combinedAll = computeCombinedRecords();
     const combinedPageSize = 10;
     const totalCombined = combinedAll.length;
     const totalCombinedPages = Math.max(1, Math.ceil(totalCombined / combinedPageSize));
@@ -2840,28 +2934,40 @@ const handleCustomerSubmit = async (event: FormEvent<HTMLFormElement>) => {
               <thead>
                 <tr>
                   <th>날짜</th>
-                  <th>이름</th>
-                  <th>거래 품명</th>
-                  <th>계정</th>
-                  <th>수량</th>
+                  <th>구분</th>
+                  <th>품명</th>
+                  <th>고객</th>
+                  <th>연락처</th>
+                  <th>미터</th>
                   <th>단가</th>
-                  <th>금액</th>
-                  <th>남은외상금액</th>
+                  <th>매출합계</th>
+                  <th>출금</th>
+                  <th>입금</th>
+                  <th>매입합계</th>
+                  <th>잔액</th>
+                  <th>관련 판매</th>
+                  <th>비고</th>
                 </tr>
               </thead>
               <tbody>
                 {pagedCombined.map((r) => {
-                  const stableKey = `row-${r.ts}-${r.account}-${r.name}-${r.product}-${r.amount}`;
+                  const stableKey = `row-${r.ts}-${r.type}-${r.customer}-${r.product}-${r.salesTotal}-${r.inflow}-${r.outflow}`;
                   return (
                   <tr key={stableKey}>
                     <td>{r.ts}</td>
-                    <td>{r.name || "-"}</td>
+                    <td>{r.type}</td>
                     <td>{r.product || "-"}</td>
-                    <td>{r.account}</td>
+                    <td>{r.customer || "-"}</td>
+                    <td>{r.phone || "-"}</td>
                     <td>{r.qty ? formatNumber(Number(r.qty)) : "-"}</td>
                     <td>{r.unit ? formatCurrency(Number(r.unit)) : "-"}</td>
-                    <td>{r.amount ? formatCurrency(Number(r.amount)) : "-"}</td>
-                    <td>{r.outstanding ? formatCurrency(Number(r.outstanding)) : "-"}</td>
+                    <td>{r.salesTotal ? formatCurrency(Number(r.salesTotal)) : "-"}</td>
+                    <td>{r.outflow ? formatCurrency(Number(r.outflow)) : "-"}</td>
+                    <td>{r.inflow ? formatCurrency(Number(r.inflow)) : "-"}</td>
+                    <td>{r.purchaseTotal ? formatCurrency(Number(r.purchaseTotal)) : "-"}</td>
+                    <td>{r.balance ? formatCurrency(Number(r.balance)) : "-"}</td>
+                    <td>{r.saleId || "-"}</td>
+                    <td>{r.note || "-"}</td>
                   </tr>
                   );})}
               </tbody>
