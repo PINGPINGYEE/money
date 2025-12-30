@@ -1263,6 +1263,43 @@ fn record_credit_payment(
     load_app_data(&state).map_err(Into::into)
 }
 
+#[derive(Debug, Deserialize)]
+struct CreditAdditionPayload {
+    customer_id: i64,
+    amount: f64,
+    note: Option<String>,
+}
+
+#[tauri::command]
+fn record_credit_add(
+    state: State<DbState>,
+    payload: CreditAdditionPayload,
+) -> CommandResult<AppData> {
+    if payload.amount <= 0.0 {
+        return Err(AppError::Validation("금액은 0보다 커야 합니다.".into()).into());
+    }
+    let conn = state.open().map_err(map_app_err)?;
+    // validate customer
+    let exists = conn
+        .query_row(
+            "SELECT 1 FROM customers WHERE id = ?",
+            params![payload.customer_id],
+            |_| Ok(()),
+        )
+        .optional()
+        .map_err(map_sql_err)?;
+    if exists.is_none() {
+        return Err(AppError::Validation("존재하지 않는 고객입니다.".into()).into());
+    }
+    // insert credit (is_payment = 0)
+    conn.execute(
+        "INSERT INTO credits (ts, customer_id, sale_id, amount, is_payment, note) VALUES (?, ?, NULL, ?, 0, ?)",
+        params![now_iso(), payload.customer_id, payload.amount, payload.note.as_deref()],
+    )
+    .map_err(map_sql_err)?;
+    load_app_data(&state).map_err(Into::into)
+}
+
 fn load_app_data(state: &DbState) -> Result<AppData, AppError> {
     let conn = state.open()?;
     build_app_data(&conn)

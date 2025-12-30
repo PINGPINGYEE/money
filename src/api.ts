@@ -494,6 +494,27 @@ async function local_record_credit_payment(payload: CreditPaymentPayload): Promi
   return materialize(state);
 }
 
+// Web mock: 외상 추가(미수 증가)
+async function local_record_credit_add(payload: CreditAdditionPayload): Promise<AppData> {
+  const state = loadState();
+  const customer = state.customers.find((c) => c.id === payload.customer_id);
+  if (!customer) return materialize(state);
+  const creditId = bumpId("credit");
+  state.credits.unshift({
+    id: creditId,
+    ts: nowIso(),
+    customer_id: customer.id,
+    customer_name: customer.name,
+    customer_phone: customer.phone,
+    sale_id: null,
+    amount: payload.amount,
+    is_payment: false,
+    note: payload.note ?? "외상 추가",
+  });
+  saveState(state);
+  return materialize(state);
+}
+
 async function local_update_sale(payload: SaleUpdatePayload): Promise<AppData> {
   const state = loadState();
   const sale = state.sales.find((s) => s.id === payload.id);
@@ -684,6 +705,8 @@ async function call<T>(cmd: string, args?: Record<string, unknown>): Promise<T> 
       return (await local_record_return((args as any)?.payload)) as unknown as T;
     case "record_credit_payment":
       return (await local_record_credit_payment((args as any)?.payload)) as unknown as T;
+    case "record_credit_add":
+      return (await (local_record_credit_add as any)((args as any)?.payload)) as unknown as T;
     case "update_sale":
       return (await local_update_sale((args as any)?.payload)) as unknown as T;
     case "delete_sale":
@@ -751,6 +774,13 @@ export async function recordCreditPayment(
   payload: CreditPaymentPayload,
 ): Promise<AppData> {
   return call<AppData>("record_credit_payment", { payload });
+}
+
+// 외상 추가(미수 증가)
+export async function recordCreditAddition(
+  payload: CreditAdditionPayload,
+): Promise<AppData> {
+  return call<AppData>("record_credit_add", { payload });
 }
 
 export async function updateSale(payload: SaleUpdatePayload): Promise<AppData> {

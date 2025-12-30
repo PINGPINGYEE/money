@@ -148,6 +148,12 @@ export interface CreditPaymentPayload {
   note?: string | null;
 }
 
+export interface CreditAdditionPayload {
+  customer_id: number;
+  amount: number;
+  note?: string | null;
+}
+
 export interface ReturnPayload {
   product_id: number;
   customer_id?: number | null;
